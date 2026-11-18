@@ -1,0 +1,2556 @@
+// ============================================================================
+// 3D 桌面宠物 —— 纯 WPF（Viewport3D / Direct3D），不依赖任何游戏引擎
+// 编译：Windows 自带 csc.exe（无需安装任何东西）
+// 交互：左键拖动 | 双击跳跃 | 右键打开豆包 | Esc 退出
+// 行为：待机浮动 + 眨眼 → 随机闲逛 → 撞屏幕边缘停止 → 继续待机
+// API ：内嵌本地 HTTP 服务（TcpListener），可供豆包等外部程序控制：
+//       GET  http://127.0.0.1:8787/status
+//       POST http://127.0.0.1:8787/jump
+//       POST http://127.0.0.1:8787/walk?dir=1&seconds=5
+//       POST http://127.0.0.1:8787/idle
+// ============================================================================
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using System.Windows;
+using Microsoft.Win32;
+using SD = System.Drawing;
+using WF = System.Windows.Forms;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Media3D;
+using System.Windows.Threading;
+
+namespace DesktopPet
+{
+    public static class Program
+    {
+        [STAThread]
+        public static void Main()
+        {
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                Log.Write("unhandled: " + e.ExceptionObject);
+            };
+
+            // P0-3：单实例守卫，第二个实例静默退出（退出码 0）
+            bool createdNew;
+            Mutex mutex = null;
+            try
+            {
+                mutex = new Mutex(true, "Global\\DesktopPetWPF", out createdNew);
+            }
+            catch
+            {
+                createdNew = true; // Global 权限不足时退化为本地实例
+            }
+            if (mutex != null && !createdNew)
+            {
+                SecondInstanceNotify();
+                Log.Write("second instance exit");
+                return;
+            }
+
+            Log.Write("startup");
+
+            var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
+            app.DispatcherUnhandledException += (s, e) =>
+            {
+                Log.Write("UI unhandled: " + e.Exception);
+                e.Handled = true;
+            };
+            app.Run(new PetWindow());
+
+            try
+            {
+                if (mutex != null)
+                {
+                    mutex.ReleaseMutex();
+                    mutex.Dispose();
+                }
+            }
+            catch { }
+
+            Log.Write("exit");
+        }
+
+        // 可选：给已运行的实例发一次气泡
+        static void SecondInstanceNotify()
+        {
+            try
+            {
+                using (var wc = new WebClient())
+                {
+                    wc.UploadString("http://127.0.0.1:8787/pet/chat",
+                        "application/json", "{\"text\":\"我已经在这儿啦\"}");
+                }
+            }
+            catch { }
+        }
+    }
+
+    // ============================================================================
+    // P0-2 开机自启：HKCU\...\Run，值名 DesktopPet，路径带引号；取消时删除值
+    // ============================================================================
+    public static class AutoStart
+    {
+        const string RunKey = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+        const string ValueName = "DesktopPet";
+
+        public static bool IsEnabled()
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(RunKey))
+                {
+                    return key != null && key.GetValue(ValueName) != null;
+                }
+            }
+            catch { return false; }
+        }
+
+        public static void Set(bool on)
+        {
+            try
+            {
+                if (on)
+                {
+                    string exe = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                    if (string.IsNullOrEmpty(exe)) return;
+                    using (var key = Registry.CurrentUser.CreateSubKey(RunKey))
+                    {
+                        key.SetValue(ValueName, "\"" + exe + "\"");
+                    }
+                }
+                else
+                {
+                    using (var key = Registry.CurrentUser.OpenSubKey(RunKey, true))
+                    {
+                        if (key != null && key.GetValue(ValueName) != null)
+                            key.DeleteValue(ValueName, false);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Write("autostart set: " + ex.Message);
+            }
+        }
+    }
+
+    public class PetWindow : Window
+    {
+        // ---------------- 行为参数 ----------------
+        const double WalkSpeed = 60.0;   // 行走速度（像素/秒）
+        const double IdleMin = 2.0, IdleMax = 6.0;   // 待机随机时长（秒）
+        const double WalkMin = 3.0, WalkMax = 8.0;   // 行走随机时长（秒）
+        const double BlinkCycle = 3.4;   // 眨眼周期（秒）
+        const double BlinkLen = 0.13;    // 眨眼时长（秒）
+
+        enum State { Idle, Walk, Happy, Shy, Curious, Sleepy, Doze }
+
+        readonly DispatcherTimer _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+        readonly Random _rand = new Random();
+        State _state = State.Idle;
+        double _clock;            // 累计时间（秒）
+        double _stateTimer;       // 当前状态剩余时间
+        double _dir = 1.0;        // 行走方向：1 右，-1 左
+        bool _dragging;
+        Point _dragMouse, _dragWin;
+        double _downCX, _downCY;    // FIX-CLICK-2 P0-1：按下时刻物理像素光标（GetCursorPos 原值），单击判定唯一基准
+        bool _dragPending;          // FIX-CLICK-2 P0-2：按下未确认拖动——期间窗口一动不动（修"点一下抖一下"+假位移）
+        double _downClock;        // 按下时刻（_clock，秒）——区分纯点击与拖动
+        double _wakeSuppressUntil;// 菜单「睡眠」后 0.8s 内抑制鼠标路径唤醒，防止菜单冒泡把它点醒
+        DispatcherTimer _dragGuard; // P0-1 兜底：按下 500ms 后仍未松手且位移<5 DIP → 视为单击
+
+        // 弹珠模式：拖拽时记录速度，甩到边界就脱手弹出去，之后在四壁之间来回弹到停下
+        bool _ballFlight;
+        double _ballVX, _ballVY;      // 自由飞行速度（DIP/秒）
+        double _dragVX, _dragVY;      // 拖动速度（DIP/秒，指数平滑）
+        double _dragLastX, _dragLastY, _dragLastT;
+        const double BallLaunchSpeed = 200.0;   // 低于这个速度撞边界就还是老实贴住
+        const double BallThrowSpeed = 350.0;    // 松手甩出去的阈值（比撞墙阈值高些，免得随手放它就跑）
+        const double BallMaxSpeed = 1600.0;     // 初速上限，防止手快甩出光速
+        const double BallWallDamp = 0.80;       // 撞墙损失 20%
+        const double BallFriction = 700.0;      // 每秒减速 DIP/s²
+        const double BallStopSpeed = 55.0;      // 低于这个速度就停
+
+        // 变换节点
+        TranslateTransform3D _hop;   // 脚本驱动的浮动/小跳
+        TranslateTransform3D _jump;  // 双击跳跃（动画驱动）
+        RotateTransform3D _yaw;      // 朝向
+        ScaleTransform3D[] _eyeScales;
+        ScaleTransform3D[] _blushScales;
+        // FIX-GROUND P0-1/P0-2：影子随高度收缩变淡 + 落地果冻形变（欠阻尼弹簧标量）
+        ScaleTransform3D _shadowScale;
+        SolidColorBrush[] _shadowBrushes;
+        readonly double[] _shadowBaseA = { 34, 24, 16 };
+        ScaleTransform3D _squashScale;
+        ScaleTransform3D _faceSquashScale;   // 五官组：触地下压时随身体一起变形（Center=球底，ScaleY 同时产生下压位移）
+        double _squash, _squashV;
+        double _prevH;            // 上一帧离地高度，用于求竖直速度
+        double _prevVy;           // 上一帧竖直速度——触地是瞬时过零，两帧跨过触地点时
+                                  // 单帧 vy 可能掉进 (-1,-0.5] 死区，用前后两帧最大速度兜底
+        double _lastImpact = -10; // 上次触地冲击时刻（0.15s 最小间隔闸门）
+        double _turnUntil = -1;   // FIX-TURN P0-3：转圈收尾前点击只唤醒不改朝向，防"反向转一圈"。
+                                  // 存 Environment.TickCount64 毫秒——_clock 用标称 16ms 累计，DispatcherTimer
+                                  // 只会迟到不会提前，负载下 _clock 恒慢于墙钟，用它算窗口会被拉长（实测 1.33s 仍抑制）
+        double _dragStartTop;     // 按下时窗口 Top（松手下落用）
+        const double SquashK = 180;
+        static readonly double SquashC = 0.55 * 2 * Math.Sqrt(180);   // ≈0.55 倍临界阻尼，抖两下
+        // 冲击标定：规格值 mult=1.6/cap=0.28 在 K=180 下峰值仅 ~0.009，达不到验收 0.08~0.12；
+        // 实测标定 0.7/3.0 → 行走峰值 ~0.028（≤0.03）、bounce ~0.095（区间内）
+        const double SquashImpulseMult = 0.7;
+        const double SquashImpulseCap = 3.0;
+        double _shadowAppliedH = -1;
+        // 果冻二期（路线A）：body 网格下半部逐顶点形变——底部贴地压扁+横向鼓出，脸区域零位移。
+        // 注意：这是非线性形变，仿射 Transform3D 做不到；整组 _squashScale 因此保持恒等不再写入。
+        MeshGeometry3D _bodyMesh;
+        Point3D[] _bodyBase;
+        double _bodySquashApplied;
+        ControlServer _server;
+        Border _bubble;
+        TextBlock _bubbleText;
+        DispatcherTimer _bubbleTimer;
+
+        // P0-1 托盘与菜单
+        WF.NotifyIcon _tray;
+        SD.Icon _trayIcon;
+        IntPtr _hicon;
+        bool _followMouse = true;
+        System.Windows.Controls.MenuItem _miFollow;
+
+        // P0-4 瞳孔跟随
+        DispatcherTimer _pupilTimer;
+        TranslateTransform3D _pupilOffset;
+        Vector _pupilCur, _pupilTarget;
+        double _nearBoost = 1.0;
+        double _lastPupilLog;
+
+        // P0-5 嘴
+        ScaleTransform3D _mouthScale;
+        DispatcherTimer _mouthTimer;
+        bool _mouthOpen;
+
+        // P0-6 情绪状态机
+        string _mood = "neutral";
+        double _moodEyes = 1.0;        // 眼睛开合系数
+        double _moodFloatFreq = 2.0;   // 浮动频率
+        double _moodFloatAmp = 0.04;   // 浮动幅度
+        double _lastInteract;          // 上次交互时刻（秒）
+        double _zzzTimer;              // Doze 冒 Zzz 气泡计时
+        // 睡眠口水珠（仅 doze 显示）
+        ScaleTransform3D _droolScale;
+        TranslateTransform3D _droolBob;
+        double _droolVis;
+        const double DozeAfterSeconds = 300;   // 5 分钟无交互进入 Doze
+        // 闲逛侧身角：原来 ±90° 会把眼/腮红/嘴压到球的轮廓线上（薄片感），收窄到 ±35°
+        const double WalkYawDeg = 35;
+
+        // 移动钉住 + 暂停闲逛
+        double _pinTimer;              // /pet/move 后钉住秒数（期间不闲逛）
+        bool _paused;                  // /pet/pause：彻底暂停闲逛
+
+        public PetWindow()
+        {
+            AllowsTransparency = true;
+            WindowStyle = WindowStyle.None;
+            ResizeMode = ResizeMode.NoResize;
+            Background = Brushes.Transparent;
+            Topmost = true;
+            ShowInTaskbar = false;
+            Width = 320;
+            Height = 320;
+            Title = "豆仔 · 3D Desktop Pet";
+
+            var area = SystemParameters.WorkArea;
+            Left = area.Right - Width - 40;
+            Top = area.Bottom - Height;
+
+            Content = BuildLayout();
+
+            MouseLeftButtonDown += OnDown;
+            PreviewMouseLeftButtonUp += OnDragEnd;   // FIX-CLICK-WAKE P0-1：预览隧道，抢在子元素吞 up 之前
+            LostMouseCapture += OnLostCapture;       // 捕获丢失兜底，绝不允许卡在 dragging
+            MouseMove += OnMove;
+            // P0-1：右键改为 WPF 菜单（不再直接打开浏览器）
+            MouseRightButtonUp += delegate { TryOpenMenu(); };
+            KeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (e.Key == Key.Escape) Close();              // Esc：退出
+            };
+
+            _timer.Tick += Tick;
+
+            // FIX-CLICK-WAKE P0-1：单击兜底定时器（up 被吞时 500ms 后判单击）
+            _dragGuard = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            _dragGuard.Tick += delegate
+            {
+                try
+                {
+                    _dragGuard.Stop();
+                    if (!_dragging && !_dragPending) return;   // P0-2 后"按住不动"停在 pending 态，同样要兜底
+                    double d = ClickDistDip();                 // P0-3：与 up 路径共用同一套位移判定
+                    // 注意：guard 本身就在按下 500ms 时触发，IsClick 的 ms<400 恒 false——
+                    // 这里只判距离（阈值与 IsClick 一致 8 DIP），时间条件由"guard 已等 500ms"隐含。
+                    // 否则规格 §一 的"长按 700ms 醒"路径会死掉
+                    if (d >= 0 && d < 8.0)
+                    {
+                        Log.Write("drag guard: no up in 500ms, dist=" +
+                                  Math.Round(d, 1) + " -> treat as click");
+                        EndDrag();
+                    }
+                    else
+                    {
+                        Log.Write("drag guard: real drag in progress, void");
+                    }
+                }
+                catch (Exception ex) { Log.Write("drag guard: " + ex.Message); }
+            };
+            _timer.Start();
+            EnterIdle();
+
+            // P0-4 瞳孔跟随定时器（25fps，跟随关闭时暂停）
+            _pupilTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(40) };
+            _pupilTimer.Tick += PupilTick;
+            if (_followMouse) _pupilTimer.Start();
+
+            // 启动本地控制 API（供豆包等外部程序调用）
+            _server = new ControlServer(this);
+            _server.Start();
+
+            CreateTray();
+            BuildPetMenu();
+
+            // 开场白：上场 0.8s 后冒一次"豆仔来啦～"，之后不再自动说话
+            var greet = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
+            greet.Tick += delegate
+            {
+                try
+                {
+                    greet.Stop();
+                    ShowBubble("豆仔来啦～");
+                }
+                catch (Exception ex) { Log.Write("greet: " + ex.Message); }
+            };
+            greet.Start();
+        }
+
+        protected override void OnClosed(EventArgs e)
+        {
+            try
+            {
+                if (_tray != null)
+                {
+                    _tray.Visible = false;
+                    _tray.Dispose();
+                    _tray = null;
+                }
+                if (_trayIcon != null)
+                {
+                    _trayIcon.Dispose();
+                    _trayIcon = null;
+                }
+                if (_hicon != IntPtr.Zero)
+                {
+                    DestroyIcon(_hicon);
+                    _hicon = IntPtr.Zero;
+                }
+            }
+            catch (Exception ex) { Log.Write("tray dispose: " + ex.Message); }
+            base.OnClosed(e);
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern bool DestroyIcon(IntPtr hIcon);
+
+        // ================= P0-1 托盘 =================
+
+        void CreateTray()
+        {
+            try
+            {
+                // 代码现画 32×32 蓝白圆球图标，不落磁盘
+                using (var bmp = new SD.Bitmap(32, 32))
+                {
+                    using (var g = SD.Graphics.FromImage(bmp))
+                    {
+                        g.SmoothingMode = SD.Drawing2D.SmoothingMode.AntiAlias;
+                        g.Clear(SD.Color.Transparent);
+                        using (var body = new SD.SolidBrush(SD.Color.FromArgb(255, 126, 200, 255)))
+                            g.FillEllipse(body, 2, 3, 28, 26);
+                        using (var hi = new SD.SolidBrush(SD.Color.FromArgb(230, 255, 255, 255)))
+                            g.FillEllipse(hi, 8, 8, 7, 6);
+                        using (var pen = new SD.Pen(SD.Color.FromArgb(255, 37, 43, 56), 2))
+                            g.DrawEllipse(pen, 2, 3, 28, 26);
+                    }
+                    _hicon = bmp.GetHicon();
+                    _trayIcon = SD.Icon.FromHandle(_hicon);
+                }
+
+                _tray = new WF.NotifyIcon
+                {
+                    Icon = _trayIcon,
+                    Text = "豆仔 · 桌面宠物",
+                    Visible = true
+                };
+                _tray.DoubleClick += delegate { ShowPet(); };
+
+                var menu = new WF.ContextMenuStrip();
+                var miShow = new WF.ToolStripMenuItem("显示/隐藏");
+                miShow.Click += delegate { ToggleVisible(); };
+                var miAuto = new WF.ToolStripMenuItem("开机自启");
+                miAuto.CheckOnClick = true;
+                miAuto.Checked = AutoStart.IsEnabled();
+                miAuto.Click += delegate
+                {
+                    AutoStart.Set(miAuto.Checked);
+                    Log.Write("autostart(tray)=" + miAuto.Checked);
+                };
+                var miExit = new WF.ToolStripMenuItem("退出");
+                miExit.Click += delegate { Close(); };
+                menu.Items.Add(miShow);
+                menu.Items.Add(miAuto);
+                menu.Items.Add(new WF.ToolStripSeparator());
+                menu.Items.Add(miExit);
+                _tray.ContextMenuStrip = menu;
+                menu.Opening += delegate { miAuto.Checked = AutoStart.IsEnabled(); };
+            }
+            catch (Exception ex)
+            {
+                Log.Write("tray init: " + ex.Message);
+            }
+        }
+
+        void ShowPet()
+        {
+            try
+            {
+                ApiSetVisible(true);
+                Activate();
+            }
+            catch (Exception ex) { Log.Write("show pet: " + ex.Message); }
+        }
+
+        void ToggleVisible()
+        {
+            ApiSetVisible(Visibility != Visibility.Visible);
+        }
+
+        // ================= P0-1 宠物右键菜单 =================
+
+        void BuildPetMenu()
+        {
+            try
+            {
+                var menu = new ContextMenu();
+
+                var miSpeak = new System.Windows.Controls.MenuItem { Header = "说句话…" };
+                miSpeak.Click += delegate { ShowSpeakDialog(); };
+                menu.Items.Add(miSpeak);
+
+                var miAct = new System.Windows.Controls.MenuItem { Header = "动作" };
+                AddActionItem(miAct, "弹跳", "bounce");
+                AddActionItem(miAct, "摇头", "shake");
+                AddActionItem(miAct, "转圈", "turn");
+                AddActionItem(miAct, "害羞", "blush");
+                var miDoze = new System.Windows.Controls.MenuItem { Header = "睡眠" };
+                miDoze.Click += delegate { EnterDoze(); };
+                miAct.Items.Add(miDoze);
+                var miWake = new System.Windows.Controls.MenuItem { Header = "唤醒" };
+                miWake.Click += delegate { Wake(); SetMood("neutral"); };
+                miAct.Items.Add(miWake);
+                menu.Items.Add(miAct);
+
+                _miFollow = new System.Windows.Controls.MenuItem
+                {
+                    Header = "跟着鼠标",
+                    IsCheckable = true,
+                    IsChecked = _followMouse
+                };
+                _miFollow.Click += delegate
+                {
+                    _followMouse = _miFollow.IsChecked;
+                    Log.Write("follow mouse=" + _followMouse);
+                    OnFollowChanged();
+                };
+                menu.Items.Add(_miFollow);
+
+                var miPause = new System.Windows.Controls.MenuItem
+                {
+                    Header = "暂停闲逛",
+                    IsCheckable = true,
+                    IsChecked = _paused
+                };
+                miPause.Click += delegate
+                {
+                    ApiPause(miPause.IsChecked);
+                };
+                menu.Items.Add(miPause);
+                menu.Opened += delegate { miPause.IsChecked = _paused; };
+
+                var miHide = new System.Windows.Controls.MenuItem { Header = "隐藏" };
+                miHide.Click += delegate { ApiSetVisible(false); };
+                menu.Items.Add(miHide);
+
+                var miAuto = new System.Windows.Controls.MenuItem
+                {
+                    Header = "开机自启",
+                    IsCheckable = true,
+                    IsChecked = AutoStart.IsEnabled()
+                };
+                miAuto.Click += delegate
+                {
+                    AutoStart.Set(miAuto.IsChecked);
+                    Log.Write("autostart=" + miAuto.IsChecked);
+                };
+                menu.Items.Add(miAuto);
+                menu.Opened += delegate { miAuto.IsChecked = AutoStart.IsEnabled(); };
+
+                var miExit = new System.Windows.Controls.MenuItem { Header = "退出" };
+                miExit.Click += delegate { Close(); };
+                menu.Items.Add(miExit);
+
+                var miUrl = new System.Windows.Controls.MenuItem { Header = "打开豆包网页" };
+                miUrl.Click += delegate { OpenUrl(); };
+                menu.Items.Add(miUrl);
+
+                ContextMenu = menu;
+            }
+            catch (Exception ex)
+            {
+                Log.Write("menu init: " + ex.Message);
+            }
+        }
+
+        void AddActionItem(System.Windows.Controls.MenuItem parent, string label, string action)
+        {
+            var mi = new System.Windows.Controls.MenuItem { Header = label };
+            mi.Click += delegate { ApiAction(action); };
+            parent.Items.Add(mi);
+        }
+
+        void TryOpenMenu()
+        {
+            try
+            {
+                if (ContextMenu != null)
+                    ContextMenu.IsOpen = true;
+            }
+            catch (Exception ex) { Log.Write("menu open: " + ex.Message); }
+        }
+
+        // P0-4 跟随开关变化：关闭时暂停定时器（CPU 归零）并让瞳孔回正
+        void OnFollowChanged()
+        {
+            try
+            {
+                if (_pupilTimer == null) return;
+                if (_followMouse)
+                {
+                    _pupilTimer.Start();
+                }
+                else
+                {
+                    _pupilTimer.Stop();
+                    _pupilCur = new Vector(0, 0);
+                    _pupilTarget = new Vector(0, 0);
+                    _nearBoost = 1.0;
+                    if (_pupilOffset != null)
+                    {
+                        _pupilOffset.OffsetX = 0;
+                        _pupilOffset.OffsetY = 0;
+                    }
+                    SetEyes(1.0);
+                }
+            }
+            catch (Exception ex) { Log.Write("follow change: " + ex.Message); }
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        struct NativePoint
+        {
+            public int X;
+            public int Y;
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern bool GetCursorPos(out NativePoint p);
+
+        // P0-4 瞳孔跟随主循环（25fps）
+        void PupilTick(object sender, EventArgs e)
+        {
+            try
+            {
+                NativePoint p;
+                if (!GetCursorPos(out p)) return;
+
+                // DPI 换算：GetCursorPos 是物理像素，Left/Top 是 DIP（125% 缩放必须转换）
+                Vector cursorDip;
+                var src = PresentationSource.FromVisual(this);
+                if (src != null)
+                {
+                    var pt = src.CompositionTarget.TransformFromDevice.Transform(
+                        new Point(p.X, p.Y));
+                    cursorDip = new Vector(pt.X, pt.Y);
+                }
+                else
+                {
+                    cursorDip = new Vector(p.X, p.Y);
+                }
+
+                // 宠物头心（窗口内近似）
+                var head = new Point(Left + Width * 0.5, Top + Height * 0.456);
+                var v = cursorDip - new Vector(head.X, head.Y);
+                double dist = v.Length;
+
+                const double PupilMax = 0.075;  // 3D 单位最大偏移
+                if (dist > 900 || dist < 0.001)
+                {
+                    _pupilTarget = new Vector(0, 0);   // 远处缓慢回正
+                    _nearBoost = 1.0;
+                }
+                else
+                {
+                    double mag = Math.Min(dist / 200.0, 1.0) * PupilMax;
+                    v.Normalize();
+                    _pupilTarget = new Vector(v.X * mag, v.Y * mag);
+                    _nearBoost = dist < 60 ? 1.15 : 1.0;   // 靠近 60px 内眼睛放大
+                }
+
+                // 缓动：每帧向目标插值 20%，不瞬移
+                _pupilCur += (_pupilTarget - _pupilCur) * 0.2;
+                _pupilOffset.OffsetX = _pupilCur.X;
+                _pupilOffset.OffsetY = -_pupilCur.Y;   // 屏幕 Y 向下，3D Y 向上
+
+                // 验收证据：节流记录瞳孔偏移（2 秒一次）
+                if (_clock - _lastPupilLog > 2.0)
+                {
+                    _lastPupilLog = _clock;
+                    Log.Write("pupil dx=" + _pupilCur.X.ToString("F3") +
+                              " dy=" + _pupilCur.Y.ToString("F3") +
+                              " dist=" + dist.ToString("F0") +
+                              " boost=" + _nearBoost.ToString("F2"));
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Write("pupil tick: " + ex.Message);
+            }
+        }
+
+        // ================= P0-5 说话与嘴部动作 =================
+
+        void StartTalking()
+        {
+            try
+            {
+                if (_mouthTimer != null && _mouthScale != null)
+                {
+                    if (_mood == "doze")
+                    {
+                        Log.Write("mouth open skip (doze)");
+                        return;                 // 睡着时任何调用都不张合嘴，免得像吧唧嘴
+                    }
+                    _mouthTimer.Stop();
+                    _mouthOpen = false;
+                    _mouthTimer.Start();
+                    Log.Write("mouth open (talking)");
+                }
+            }
+            catch (Exception ex) { Log.Write("start talking: " + ex.Message); }
+        }
+
+        void StopTalking()
+        {
+            try
+            {
+                if (_mouthTimer != null)
+                    _mouthTimer.Stop();
+                if (_mouthScale != null)
+                    _mouthScale.ScaleY = 0.4;   // 闭嘴
+                Log.Write("mouth close");
+            }
+            catch (Exception ex) { Log.Write("stop talking: " + ex.Message); }
+        }
+
+        void ShowSpeakDialog()
+        {
+            try
+            {
+                var dlg = new Window
+                {
+                    Title = "说句话",
+                    Width = 300,
+                    Height = 140,
+                    WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                    Topmost = true,
+                    ResizeMode = ResizeMode.NoResize
+                };
+                var tb = new System.Windows.Controls.TextBox { Margin = new Thickness(10) };
+                var btn = new System.Windows.Controls.Button
+                {
+                    Content = "发送",
+                    Width = 70,
+                    Margin = new Thickness(10, 0, 10, 10),
+                    IsDefault = true
+                };
+                var panel = new System.Windows.Controls.StackPanel();
+                panel.Children.Add(tb);
+                panel.Children.Add(btn);
+                dlg.Content = panel;
+
+                btn.Click += delegate
+                {
+                    dlg.Close();
+                    ApiChat(tb.Text);
+                };
+                tb.KeyDown += delegate(object s2, KeyEventArgs e2)
+                {
+                    if (e2.Key == Key.Enter)
+                    {
+                        dlg.Close();
+                        ApiChat(tb.Text);
+                    }
+                };
+                dlg.Show();
+            }
+            catch (Exception ex) { Log.Write("speak dialog: " + ex.Message); }
+        }
+
+        // ================= 外部控制 API =================
+
+        public void ApiJump()
+        {
+            Jump();
+        }
+
+        public void ApiIdle()
+        {
+            EnterIdle();
+        }
+
+        public void ApiWalk(double dir, double seconds)
+        {
+            _state = State.Walk;
+            _dir = dir >= 0 ? 1.0 : -1.0;
+            _stateTimer = Math.Max(0.5, seconds);
+            AnimateYaw(_dir > 0 ? WalkYawDeg : -WalkYawDeg);
+        }
+
+        public string ApiStatus()
+        {
+            string stateName;
+            switch (_state)
+            {
+                case State.Walk: stateName = "walk"; break;
+                case State.Doze: stateName = "doze"; break;
+                case State.Happy: stateName = "happy"; break;
+                case State.Shy: stateName = "shy"; break;
+                case State.Curious: stateName = "curious"; break;
+                case State.Sleepy: stateName = "sleepy"; break;
+                default: stateName = "idle"; break;
+            }
+            return "{\"state\":\"" + stateName +
+                   "\",\"x\":" + (int)Left +
+                   ",\"y\":" + (int)Top +
+                   ",\"port\":" + _server.Port +
+                   ",\"visible\":" + (Visibility == Visibility.Visible ? "true" : "false") +
+                   ",\"mood\":\"" + _mood + "\"}";
+        }
+
+        // ================= P0-6 情绪状态机 =================
+
+        // mood: happy|shy|curious|sleepy|doze|neutral，非法返回 false
+        public bool SetMood(string mood)
+        {
+            switch ((mood ?? "").ToLowerInvariant())
+            {
+                case "neutral":
+                    ApplyMood("neutral", 1.0, 1.0, 2.0, 0.04, 0);
+                    if (_state == State.Doze) _state = State.Idle;
+                    break;
+                case "happy":
+                    ApplyMood("happy", 1.0, 1.5, 3.0, 0.06, 0);
+                    if (_state == State.Doze) _state = State.Idle;
+                    break;
+                case "shy":
+                    ApplyMood("shy", 0.85, 2.0, 1.6, 0.03, 0);
+                    if (_state == State.Doze) _state = State.Idle;
+                    break;
+                case "curious":
+                    ApplyMood("curious", 1.15, 1.0, 2.2, 0.04, 12);
+                    if (_state == State.Doze) _state = State.Idle;
+                    break;
+                case "sleepy":
+                    ApplyMood("sleepy", 0.5, 1.0, 1.2, 0.03, 0);
+                    if (_state == State.Doze) _state = State.Idle;
+                    break;
+                case "doze":
+                    ApplyMood("doze", 0.35, 1.0, 0.8, 0.02, 0);
+                    _state = State.Doze;
+                    _zzzTimer = 7.0;              // 先让"豆仔困啦"挂一会儿，之后才轮到 Zzz
+                    ShowBubble("豆仔困啦", false);   // 睡着不动嘴
+                    break;
+                default:
+                    return false;
+            }
+            return true;
+        }
+
+        void ApplyMood(string mood, double eyes, double blush, double freq, double amp, double tilt)
+        {
+            _mood = mood;
+            _moodEyes = eyes;
+            _moodFloatFreq = freq;
+            _moodFloatAmp = amp;
+            SetBlush(blush);
+            if (_state != State.Walk)
+            {
+                if (tilt > 0)
+                    AnimateYaw(tilt);
+                else if (_mood != "doze" || tilt == 0)
+                    AnimateYaw(0);
+            }
+            Log.Write("mood=" + mood + " eyes=" + eyes + " blush=" + blush);
+        }
+
+        void SetBlush(double factor)
+        {
+            if (_blushScales == null) return;
+            foreach (var s in _blushScales)
+            {
+                s.ScaleX = factor;
+                s.ScaleY = factor;
+                s.ScaleZ = factor;
+            }
+        }
+
+        // P0-6 任何交互/调用唤醒（Doze → Idle）
+        public void Wake()
+        {
+            _lastInteract = _clock;
+            if (_state == State.Doze)
+            {
+                _state = State.Idle;
+                SetMood("neutral");
+                Log.Write("wake up");
+                ShowBubble("豆仔醒啦");
+            }
+        }
+
+        // ---- 说话气泡 ----
+        public void ApiChat(string text)
+        {
+            ShowBubble(text);
+        }
+
+        // speak=false：只出气泡不动嘴（睡眠时的 Zzz 用这条，睡着不该吧唧嘴）
+        void ShowBubble(string text, bool speak = true)
+        {
+            _bubbleText.Text = string.IsNullOrEmpty(text) ? "..." : text;
+            _bubble.Visibility = Visibility.Visible;
+            _bubble.Opacity = 1;
+            _bubbleTimer.Stop();
+            _bubbleTimer.Start();
+            if (speak) StartTalking();    // P0-5 气泡期间嘴张合
+        }
+
+        // ---- 动作枚举：idle / bounce / shake / turn / blush ----
+        public bool ApiAction(string action)
+        {
+            switch ((action ?? "").ToLowerInvariant())
+            {
+                case "idle": EnterIdle(); return true;
+                case "bounce":
+                case "jump": Jump(); return true;
+                case "shake": Shake(); return true;
+                case "turn": Turn(); return true;
+                case "blush": Blush(); return true;
+                default: return false;
+            }
+        }
+
+        // 摇头晃脑
+        void Shake()
+        {
+            EnterIdle();
+            var kf = new DoubleAnimationUsingKeyFrames();
+            double[] angles = { 0, 28, -28, 18, -18, 0 };
+            for (int i = 0; i < angles.Length; i++)
+            {
+                kf.KeyFrames.Add(new LinearDoubleKeyFrame(
+                    angles[i], KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(i * 140))));
+            }
+            _yaw.Rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, kf);
+        }
+
+        // 转一圈（FIX-TURN P0-1）：从当前基准角出发转 360°，FillBehavior.Stop 不把动画值钉在 360——
+        // 旧实现 HoldEnd 钉 360 后，单击 AnimateYaw(0) 会取 360 当起点反向转一整圈。
+        // 900ms / EaseInOut 保持不变
+        void Turn()
+        {
+            EnterIdle();
+            double start = ((AxisAngleRotation3D)_yaw.Rotation).Angle % 360.0;      // 基准角（正常为 0）
+            var a = new DoubleAnimation(start, start + 360, TimeSpan.FromMilliseconds(900))
+                    { FillBehavior = FillBehavior.Stop };     // 关键：转完不保留 360
+            a.EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseInOut };
+            a.Completed += delegate
+            {
+                try
+                {
+                    _yaw.Rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);
+                    ((AxisAngleRotation3D)_yaw.Rotation).Angle = start;   // 360 ≡ start，视觉零跳变
+                    Log.Write("turn done, yaw reset to " + start);
+                }
+                catch (Exception ex) { Log.Write("turn done: " + ex.Message); }
+            };
+            _yaw.Rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, a);
+            _turnUntil = Environment.TickCount + 950.0;        // 转圈收尾前点击不抢朝向（P0-3，墙钟毫秒；
+                                                               // .NET Framework 无 TickCount64，int 毫秒 24.9 天回绕对宠物进程无实际影响）
+            Log.Write("turn start deg=" + Math.Round(start, 1));
+        }
+
+        // 害羞（腮红放大收缩）
+        void Blush()
+        {
+            EnterIdle();
+            foreach (var s in _blushScales)
+            {
+                Pulse(s, 1.9, 900);
+            }
+        }
+
+        static void Pulse(ScaleTransform3D s, double peak, double ms)
+        {
+            var props = new[]
+            {
+                ScaleTransform3D.ScaleXProperty,
+                ScaleTransform3D.ScaleYProperty,
+                ScaleTransform3D.ScaleZProperty
+            };
+            foreach (var prop in props)
+            {
+                // 基准值先归 1：动画结束后移除动画，属性回到可自由设置的状态
+                s.BeginAnimation(prop, null);
+                if (prop == ScaleTransform3D.ScaleXProperty) s.ScaleX = 1;
+                else if (prop == ScaleTransform3D.ScaleYProperty) s.ScaleY = 1;
+                else s.ScaleZ = 1;
+
+                var kf = new DoubleAnimationUsingKeyFrames();
+                kf.KeyFrames.Add(new LinearDoubleKeyFrame(1, KeyTime.FromTimeSpan(TimeSpan.Zero)));
+                var up = new EasingDoubleKeyFrame(peak,
+                    KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(ms * 0.4)));
+                up.EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut };
+                kf.KeyFrames.Add(up);
+                var down = new EasingDoubleKeyFrame(1,
+                    KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(ms)));
+                down.EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseInOut };
+                kf.KeyFrames.Add(down);
+                var capturedProp = prop;
+                kf.Completed += delegate { s.BeginAnimation(capturedProp, null); };
+                s.BeginAnimation(prop, kf);
+            }
+        }
+
+        // ---- 显隐 ----
+        public void ApiSetVisible(bool show)
+        {
+            Visibility = show ? Visibility.Visible : Visibility.Hidden;
+        }
+
+        // ================= P0-7 多显示器工作区 =================
+
+        // 宠物中心点所在屏幕的工作区（换算为 DIP 坐标）
+        Rect WorkArea()
+        {
+            try
+            {
+                var src = PresentationSource.FromVisual(this);
+                if (src == null)
+                {
+                    var wa0 = SystemParameters.WorkArea;
+                    return new Rect(wa0.Left, wa0.Top, wa0.Width, wa0.Height);
+                }
+                var toDev = src.CompositionTarget.TransformToDevice;
+                var fromDev = src.CompositionTarget.TransformFromDevice;
+                var center = toDev.Transform(new Point(Left + Width * 0.5, Top + Height * 0.5));
+                var screen = WF.Screen.FromPoint(new SD.Point((int)center.X, (int)center.Y));
+                var tl = fromDev.Transform(new Point(screen.WorkingArea.Left, screen.WorkingArea.Top));
+                var br = fromDev.Transform(new Point(screen.WorkingArea.Right, screen.WorkingArea.Bottom));
+                return new Rect(tl, br);
+            }
+            catch
+            {
+                var wa = SystemParameters.WorkArea;
+                return new Rect(wa.Left, wa.Top, wa.Width, wa.Height);
+            }
+        }
+
+        // 贴边吸附：不允许半只球悬在屏幕外；显示器切换/拔插后自动纠正
+        void ClampToWorkArea()
+        {
+            try
+            {
+                var wa = WorkArea();
+                double x = Math.Max(wa.Left, Math.Min(wa.Right - Width, Left));
+                double y = Math.Max(wa.Top, Math.Min(wa.Bottom - Height, Top));
+                if (x != Left) Left = x;
+                if (y != Top) Top = y;
+            }
+            catch (Exception ex) { Log.Write("clamp: " + ex.Message); }
+        }
+
+        // ---- 平滑移动到屏幕坐标 ----
+        public void ApiMoveTo(double x, double y)
+        {
+            var area = WorkArea();
+            x = Math.Max(area.Left, Math.Min(area.Right - Width, x));
+            y = Math.Max(area.Top, Math.Min(area.Bottom - Height, y));
+
+            // 执行前强制切 idle 并暂停闲逛，完成后 2 秒"钉住"再恢复
+            if (_state == State.Walk)
+                EnterIdle();
+            _pinTimer = 2.0;
+
+            var ax = new DoubleAnimation(x, TimeSpan.FromMilliseconds(600));
+            ax.EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseInOut };
+            var ay = new DoubleAnimation(y, TimeSpan.FromMilliseconds(600));
+            ay.EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseInOut };
+
+            // 关键：动画结束后立即移除动画（FillBehavior.HoldEnd 会一直"持有"
+            // Left/Top 属性，导致之后的拖动和行走赋值全部失效）
+            double fx = x, fy = y;
+            ax.Completed += delegate
+            {
+                BeginAnimation(Window.LeftProperty, null);
+                BeginAnimation(Window.TopProperty, null);
+                Left = fx;
+                Top = fy;
+            };
+            BeginAnimation(Window.LeftProperty, ax);
+            BeginAnimation(Window.TopProperty, ay);
+        }
+
+        // 暂停/恢复闲逛（手动 /walk 等显式指令不受影响）
+        public void ApiPause(bool on)
+        {
+            _paused = on;
+            Log.Write("pause=" + on);
+            if (on && _state == State.Walk)
+                EnterIdle();   // 立即停下
+        }
+
+        // ================= 场景搭建 =================
+
+        // 3D 视口 + 说话气泡叠层
+        UIElement BuildLayout()
+        {
+            var grid = new Grid();
+            grid.Children.Add(BuildScene());
+
+            _bubble = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(235, 0xFF, 0xFF, 0xFF)),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(10, 6, 10, 6),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(0, 34, 0, 0),   // 场景下移 26px 后，气泡同步下压，仍贴在球顶上方
+                MaxWidth = 280,
+                Visibility = Visibility.Collapsed
+            };
+            _bubbleText = new TextBlock
+            {
+                Foreground = Brushes.Black,
+                FontSize = 13,
+                TextWrapping = TextWrapping.Wrap
+            };
+            _bubble.Child = _bubbleText;
+            grid.Children.Add(_bubble);
+
+            _bubbleTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+            _bubbleTimer.Tick += delegate
+            {
+                _bubbleTimer.Stop();
+                _bubble.Visibility = Visibility.Collapsed;
+                StopTalking();                     // P0-5 气泡消失后闭嘴
+            };
+
+            // P0-5 嘴张合节奏（约 120ms 一次开合）
+            _mouthTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
+            _mouthTimer.Tick += delegate
+            {
+                _mouthOpen = !_mouthOpen;
+                if (_mouthScale != null)
+                    _mouthScale.ScaleY = _mouthOpen ? 0.9 : 0.25;
+            };
+
+            return grid;
+        }
+
+        Viewport3D BuildScene()
+        {
+            var viewport = new Viewport3D();
+
+            viewport.Camera = new PerspectiveCamera
+            {
+                Position = new Point3D(0, 1.8, 5.0),
+                LookDirection = new Vector3D(0, -0.25, -1),
+                FieldOfView = 45
+            };
+
+            var content = new Model3DGroup();
+            // 整体下移：原来球顶距窗口顶只剩 59px，跳跃峰值 87px 会被窗口切掉，先让出 26px 空间
+            content.Transform = new TranslateTransform3D(0, -0.267, 0);
+            // 环境光 0x86/0x8E/0x9C：回到"淡蓝"基调，但比原 0x90 略低留一点体积
+            content.Children.Add(new AmbientLight(Color.FromRgb(0x88, 0x8C, 0x94)));
+            var sun = new DirectionalLight();
+            sun.Color = Color.FromRgb(0xF4, 0xF7, 0xFA);        // 略压白，防顶部冲成纯白
+            sun.Direction = new Vector3D(-0.42, -1.05, -1.45);   // 往正面偏：最亮点落在脸中央，顶部轮廓不吃到最亮
+            content.Children.Add(sun);
+            // 左下角一盏很弱的冷补光，只把暗部边缘托起来一点，不冲淡主光
+            var fill = new DirectionalLight();
+            fill.Color = Color.FromRgb(0x40, 0x52, 0x66);
+            fill.Direction = new Vector3D(0.85, 0.55, -0.35);
+            content.Children.Add(fill);
+
+            // 地面软阴影：三层同心叠片伪径向渐变，全部沉到球底之下（原单层 y=0.01 会横切球底）
+            _shadowBrushes = new SolidColorBrush[3];
+            double[] shadowR = { 1.15, 0.95, 0.75 };
+            double[] shadowY = { -0.021, -0.019, -0.017 };   // 错开 0.002 防 Z-fighting
+            _shadowScale = new ScaleTransform3D();            // Center 默认 (0,0,0)，disc 以原点为中心
+            for (int i = 0; i < 3; i++)
+            {
+                // 影子用冷调黑，纯黑在蓝球下显脏；透明度下调防中心过重、减轻三环台阶
+                _shadowBrushes[i] = new SolidColorBrush(Color.FromArgb((byte)_shadowBaseA[i], 0x12, 0x1C, 0x2A));
+                var disc = new GeometryModel3D(MakeDisc(shadowR[i], 32),
+                    new DiffuseMaterial(_shadowBrushes[i]));
+                var dgroup = new Transform3DGroup();
+                dgroup.Children.Add(new TranslateTransform3D(0, shadowY[i], 0));
+                dgroup.Children.Add(_shadowScale);
+                disc.Transform = dgroup;
+                content.Children.Add(disc);
+            }
+
+            content.Children.Add(BuildPet());
+
+            var visual = new ModelVisual3D { Content = content };
+            viewport.Children.Add(visual);
+            return viewport;
+        }
+
+        Model3DGroup BuildPet()
+        {
+            // 球体：漫反射 + 一层柔和高光（原来纯 diffuse 没有亮斑，像哑光塑料片）
+            var bodyDiffuse = new DiffuseMaterial(new SolidColorBrush(Color.FromRgb(0x8A, 0xD0, 0xFF)));
+            var bodyMat = new MaterialGroup();
+            bodyMat.Children.Add(bodyDiffuse);
+            bodyMat.Children.Add(new SpecularMaterial(new SolidColorBrush(Color.FromArgb(70, 255, 255, 255)), 90.0));
+            var darkMat = new DiffuseMaterial(new SolidColorBrush(Color.FromRgb(0x25, 0x2B, 0x38)));
+            var whiteMat = new DiffuseMaterial(new SolidColorBrush(Colors.White));
+
+            var pet = new Model3DGroup();
+
+            // 身体（果冻史莱姆造型）；网格引用留存用于下半部逐顶点果冻形变
+            _bodyMesh = Sphere(1.0, 24, 32);
+            _bodyBase = new Point3D[_bodyMesh.Positions.Count];
+            _bodyMesh.Positions.CopyTo(_bodyBase, 0);
+            var body = new GeometryModel3D(_bodyMesh, bodyMat);
+            body.Transform = new TranslateTransform3D(0, 1.0, 0);
+            pet.Children.Add(body);
+
+            // 五官容器：触地下压时整组变形（下压位移 + 轻微压扁）
+            var face = new Model3DGroup();
+
+            // 双眼（可缩放实现眨眼）+ 眼睛高光；双眼共享 _pupilOffset 实现瞳孔跟随
+            double[] eyeX = { -0.32, 0.32 };
+            _pupilOffset = new TranslateTransform3D();
+            for (int i = 0; i < 2; i++)
+            {
+                var scale = new ScaleTransform3D
+                {
+                    CenterX = eyeX[i],
+                    CenterY = 1.45,
+                    CenterZ = 0.86
+                };
+                _eyeScales = Append(_eyeScales, scale);
+
+                var eye = new GeometryModel3D(Sphere(0.13, 10, 14), darkMat);
+                var eyeGroup = new Transform3DGroup();
+                eyeGroup.Children.Add(new TranslateTransform3D(eyeX[i], 1.45, 0.86));
+                eyeGroup.Children.Add(_pupilOffset);
+                eyeGroup.Children.Add(scale);
+                eye.Transform = eyeGroup;
+                face.Children.Add(eye);
+
+                var shine = new GeometryModel3D(Sphere(0.034, 8, 10), whiteMat);
+                // 高光跟随瞳孔：定位 → 共享 _pupilOffset → 共享 scale（链尾，
+                // 眨眼时以眼心为中心压扁，高光随瞳孔一起被压扁贴到眼皮）
+                // 高光半径/位置调小内收（0.045→0.034，上移量 0.07→0.047）：原来太大又贴着眼球上边缘，
+                // 瞳孔朝右偏移时白点会被轮廓切掉，看着像粘在眼角的一颗珠子
+                var shineGroup = new Transform3DGroup();
+                shineGroup.Children.Add(new TranslateTransform3D(eyeX[i] - 0.028, 1.497, 0.95));
+                shineGroup.Children.Add(_pupilOffset);
+                shineGroup.Children.Add(scale);
+                shine.Transform = shineGroup;
+                face.Children.Add(shine);
+            }
+
+            // P0-5 嘴（气泡说话时按 120ms 节奏张合）
+            _mouthScale = new ScaleTransform3D
+            {
+                CenterX = 0,
+                CenterY = 1.02,
+                CenterZ = 0.90,
+                ScaleY = 0.4,
+                ScaleZ = 0.35
+            };
+            var mouth = new GeometryModel3D(Sphere(0.10, 8, 12), darkMat);
+            var mouthGroup = new Transform3DGroup();
+            mouthGroup.Children.Add(new TranslateTransform3D(0, 1.02, 0.90));
+            mouthGroup.Children.Add(_mouthScale);
+            mouth.Transform = mouthGroup;
+            face.Children.Add(mouth);
+
+            // 睡眠口水珠：挂在嘴角右下方，只有 doze 时淡入（_droolScale 0 = 隐藏）
+            // 材质给一点高光，看着像湿的水珠而不是一个粉色球
+            var droolMat = new MaterialGroup();
+            droolMat.Children.Add(new DiffuseMaterial(new SolidColorBrush(Color.FromArgb(255, 0xD9, 0xEE, 0xFF))));
+            droolMat.Children.Add(new SpecularMaterial(new SolidColorBrush(Color.FromArgb(255, 255, 255, 255)), 90.0));
+            droolMat.Children.Add(new EmissiveMaterial(new SolidColorBrush(Color.FromArgb(0x48, 0xE8, 0xF7, 0xFF))));
+            _droolScale = new ScaleTransform3D(0, 0, 0);
+            _droolBob = new TranslateTransform3D();
+            // 三颗球串成水滴：脖子细、下坠大，整体挪到嘴角外侧，不压着嘴
+            double[] droolR = { 0.019, 0.030, 0.042 };
+            double[] droolX = { 0.112, 0.120, 0.126 };
+            double[] droolY = { 1.004, 0.968, 0.928 };
+            for (int i = 0; i < 3; i++)
+            {
+                var d = new GeometryModel3D(Sphere(droolR[i], 10, 14), droolMat);
+                var tg = new Transform3DGroup();
+                tg.Children.Add(new TranslateTransform3D(droolX[i], droolY[i], 0.918));
+                tg.Children.Add(_droolBob);
+                tg.Children.Add(_droolScale);
+                d.Transform = tg;
+                face.Children.Add(d);
+            }
+
+            // 腮红（害羞时可放大）
+            // 腮红：环境光调低后原 160 alpha 会发闷，提到 195 保住粉感
+            var blushMat = new DiffuseMaterial(new SolidColorBrush(Color.FromArgb(195, 0xFF, 0xA3, 0xBA)));
+            double[] blushX = { -0.62, 0.62 };
+            for (int i = 0; i < 2; i++)
+            {
+                var scale = new ScaleTransform3D
+                {
+                    CenterX = blushX[i],
+                    CenterY = 1.12,
+                    CenterZ = 0.78
+                };
+                _blushScales = Append(_blushScales, scale);
+
+                var blush = new GeometryModel3D(Sphere(0.09, 8, 10), blushMat);
+                var blushGroup = new Transform3DGroup();
+                blushGroup.Children.Add(new TranslateTransform3D(blushX[i], 1.12, 0.78));
+                blushGroup.Children.Add(scale);
+                blush.Transform = blushGroup;
+                face.Children.Add(blush);
+            }
+
+            // 五官组变换：Scale Center=球底(0,0,0)——ScaleY<1 时五官整体下压（位移=高度×压缩比）
+            var faceT = new Transform3DGroup();
+            _faceSquashScale = new ScaleTransform3D();
+            faceT.Children.Add(_faceSquashScale);
+            face.Transform = faceT;
+            pet.Children.Add(face);
+
+            // 整体变换：落地压扁 → 跳跃 → 浮动 → 朝向（scale 在链首=最后作用于装配好的整体，
+            // Center (0,0,0)=球底，"从脚底往上塌"）
+            var group = new Transform3DGroup();
+            _squashScale = new ScaleTransform3D();
+            group.Children.Add(_squashScale);
+            _jump = new TranslateTransform3D();
+            _hop = new TranslateTransform3D();
+            var rotation = new AxisAngleRotation3D(new Vector3D(0, 1, 0), 0);
+            _yaw = new RotateTransform3D(rotation, new Point3D(0, 1, 0));
+            group.Children.Add(_jump);
+            group.Children.Add(_hop);
+            group.Children.Add(_yaw);
+            pet.Transform = group;
+
+            return pet;
+        }
+
+        static T[] Append<T>(T[] arr, T item)
+        {
+            var n = new T[arr == null ? 1 : arr.Length + 1];
+            if (arr != null) Array.Copy(arr, n, arr.Length);
+            n[n.Length - 1] = item;
+            return n;
+        }
+
+        // ================= 几何体生成 =================
+
+        static MeshGeometry3D Sphere(double radius, int stacks, int slices)
+        {
+            var mesh = new MeshGeometry3D();
+            for (int i = 0; i <= stacks; i++)
+            {
+                double phi = Math.PI * i / stacks;
+                for (int j = 0; j <= slices; j++)
+                {
+                    double theta = 2 * Math.PI * j / slices;
+                    double x = Math.Sin(phi) * Math.Cos(theta);
+                    double y = Math.Cos(phi);
+                    double z = Math.Sin(phi) * Math.Sin(theta);
+                    mesh.Positions.Add(new Point3D(radius * x, radius * y, radius * z));
+                    mesh.Normals.Add(new Vector3D(x, y, z));
+                }
+            }
+            for (int i = 0; i < stacks; i++)
+            {
+                for (int j = 0; j < slices; j++)
+                {
+                    int a = i * (slices + 1) + j;
+                    int b = a + slices + 1;
+                    mesh.TriangleIndices.Add(a);
+                    mesh.TriangleIndices.Add(b);
+                    mesh.TriangleIndices.Add(a + 1);
+                    mesh.TriangleIndices.Add(b);
+                    mesh.TriangleIndices.Add(b + 1);
+                    mesh.TriangleIndices.Add(a + 1);
+                }
+            }
+            return mesh;
+        }
+
+        static MeshGeometry3D MakeDisc(double radius, int seg)
+        {
+            var mesh = new MeshGeometry3D();
+            mesh.Positions.Add(new Point3D(0, 0, 0));
+            mesh.Normals.Add(new Vector3D(0, 1, 0));
+            for (int i = 0; i <= seg; i++)
+            {
+                double a = 2 * Math.PI * i / seg;
+                mesh.Positions.Add(new Point3D(radius * Math.Cos(a), 0, radius * Math.Sin(a)));
+                mesh.Normals.Add(new Vector3D(0, 1, 0));
+            }
+            for (int i = 1; i <= seg; i++)
+            {
+                mesh.TriangleIndices.Add(0);
+                mesh.TriangleIndices.Add(i + 1);
+                mesh.TriangleIndices.Add(i);
+            }
+            return mesh;
+        }
+
+        // ================= 主循环（状态机） =================
+
+        void Tick(object sender, EventArgs e)
+        {
+            try
+            {
+                double dt = _timer.Interval.TotalSeconds;
+                _clock += dt;
+                _stateTimer -= dt;
+                if (_pinTimer > 0) _pinTimer -= dt;   // 移动后钉住计时
+
+                // FIX-GROUND：离地高度 / 落地弹簧形变 / 影子收缩
+                double h = Math.Max(0, _hop.OffsetY + _jump.OffsetY);
+                double vy = (h - _prevH) / dt;
+                _squashV += (-SquashK * _squash - SquashC * _squashV) * dt;   // 弹簧积分
+                _squash += _squashV * dt;
+                if (_squash < 0) { _squash = 0; if (_squashV < 0) _squashV = 0; }   // 只压不拉
+                if (_squash > 0.12) _squash = 0.12;                                  // 上限 12%
+                // 触地检测：贴地(h<0.03)且明显下坠。速度取本帧与上一帧的较大值——
+                // BounceEase 触地是瞬时过零，若两帧恰好跨过触地点且渲染节拍不稳，
+                // 单帧 vy 可能落进 (-1,-0.5] 死区而漏判；前后帧取 max 消除该窗口。
+                // 高处缓降(_prevH>0.08)兜底拖高松手这类小落差；闲置呼吸斜率≤0.08/s 绝无可能误触。
+                // 0.15s 闸门防行走小跳连环触发
+                double impactSpeed = Math.Max(Math.Abs(vy), Math.Abs(_prevVy));
+                if (h < 0.03 && impactSpeed > 0.5 &&
+                    (impactSpeed > 1.0 || _prevH > 0.08) &&
+                    _clock - _lastImpact > 0.15)
+                {
+                    _squashV += Math.Min(impactSpeed * SquashImpulseMult, SquashImpulseCap);
+                    _lastImpact = _clock;
+                    Log.Write("land vy=" + Math.Round(vy, 2) + " squashV=" + Math.Round(_squashV, 2));
+                }
+                _prevVy = vy;
+                _prevH = h;
+                if (Math.Abs(_squash - _bodySquashApplied) > 0.0025)
+                {
+                    _bodySquashApplied = _squash;
+                    ApplyBodySquash();               // 路线A：下半部逐顶点果冻形变
+                    // 五官随压扁一起下压变形：ScaleY=1-0.6s（Center=球底 → 眼(1.45)下压 ~0.87s·单位 ≈ 7px），
+                    // 横向轻微外扩近体积守恒；与身体上部表面位移(≈0.4s)方向一致，眼睛不会从眼窝里脱出
+                    _faceSquashScale.ScaleY = 1.0 - _squash * 0.6;
+                    _faceSquashScale.ScaleX = 1.0 + _squash * 0.15;
+                    _faceSquashScale.ScaleZ = 1.0 + _squash * 0.15;
+                }
+                // 影子随离地高度收缩变淡（挂在 content，不跟 pet 组跳）
+                if (Math.Abs(h - _shadowAppliedH) > 0.015)
+                {
+                    _shadowAppliedH = h;
+                    double ss = 1.0 - 0.35 * h;
+                    _shadowScale.ScaleX = ss;
+                    _shadowScale.ScaleZ = ss;
+                    for (int i = 0; i < _shadowBrushes.Length; i++)
+                    {
+                        byte a = (byte)(_shadowBaseA[i] * Math.Max(0.0, 1.0 - 0.6 * h));
+                        _shadowBrushes[i].Color = Color.FromArgb(a, 0, 0, 0);
+                    }
+                }
+
+                // 弹珠模式：自由飞行（撞壁反弹 + 摩擦减速）；飞行期间不让它自己走
+                if (_ballFlight) TickBallFlight(dt);
+
+                if (_state == State.Walk)
+                {
+                    _hop.OffsetY = Math.Abs(Math.Sin(_clock * 9.0)) * 0.14;  // 行走小跳
+                    SetEyes(1.0);
+                    var area = WorkArea();
+                    double nx = Left + _dir * WalkSpeed * dt;
+                    if (nx < area.Left || nx + Width > area.Right || _stateTimer <= 0)
+                    {
+                        EnterIdle();
+                    }
+                    else
+                    {
+                        Left = nx;
+                    }
+                }
+                else
+                {
+                    // 非行走状态：情绪姿态浮动（待机/情绪/打盹共用）
+                    // FIX-GROUND P0-5：非负呼吸曲线（0→amp→0，两端导数为 0），负半周会把球底压进地里
+                    _hop.OffsetY = (1 - Math.Cos(_clock * _moodFloatFreq)) * 0.5 * _moodFloatAmp;
+                    if (_hop.OffsetY < 0) _hop.OffsetY = 0;
+                    SetEyes(Blink(_clock) ? 0.15 : _moodEyes);
+
+                    // P0-6 Doze：偶尔冒 Zzz 气泡
+                    if (_state == State.Doze)
+                    {
+                        _zzzTimer -= dt;
+                        if (_zzzTimer <= 0)
+                        {
+                            _zzzTimer = 6.0 + _rand.NextDouble() * 4.0;
+                            ShowBubble("Zzz", false);   // 只出气泡，不动嘴
+                        }
+                    }
+
+                    // P0-6 长时间无交互 → Doze
+                    if (_state == State.Idle && _clock - _lastInteract > DozeAfterSeconds)
+                    {
+                        Log.Write("doze (inactive " + DozeAfterSeconds + "s)");
+                        SetMood("doze");
+                    }
+
+                    // 待机时随机闲逛计时（钉住期/暂停期不闲逛）
+                    if (_state == State.Idle && _stateTimer <= 0 &&
+                        _pinTimer <= 0 && !_paused && !_ballFlight)
+                        EnterWalk();
+                }
+
+                // 睡眠口水珠：doze 淡入（0→1）、醒后缩回；出现时随呼吸轻轻上下
+                double droolTarget = (_mood == "doze") ? 1.0 : 0.0;
+                _droolVis += (droolTarget - _droolVis) * 0.18;
+                if (_droolScale != null)
+                {
+                    _droolScale.ScaleX = _droolVis;
+                    _droolScale.ScaleY = _droolVis;
+                    _droolScale.ScaleZ = _droolVis;
+                }
+                if (_droolBob != null)
+                    _droolBob.OffsetY = _droolVis > 0.02 ? Math.Sin(_clock * 1.5) * 0.012 : 0;
+
+                // P0-7 每帧吸附到当前屏幕工作区（显示器切换/拔插自动纠正）
+                ClampToWorkArea();
+            }
+            catch (Exception ex)
+            {
+                Log.Write("tick: " + ex.Message);
+            }
+        }
+
+        bool Blink(double t)
+        {
+            return (t % BlinkCycle) < BlinkLen;
+        }
+
+        void EnterIdle()
+        {
+            _state = State.Idle;
+            _stateTimer = IdleMin + _rand.NextDouble() * (IdleMax - IdleMin);
+            AnimateYaw(0);
+        }
+
+        void EnterWalk()
+        {
+            _state = State.Walk;
+            _stateTimer = WalkMin + _rand.NextDouble() * (WalkMax - WalkMin);
+            _dir = _rand.Next(2) == 0 ? 1.0 : -1.0;
+            AnimateYaw(_dir > 0 ? WalkYawDeg : -WalkYawDeg);
+        }
+
+        // FIX-TURN P0-2：一律走最短路径——delta 折进 (-180,180]，起点取与 target 等价且离当前最近的角。
+        // 校验：cur=360,target=0 → delta 0 → 不动；cur=200,target=0 → 从 -160 → 0（顺向最短，不倒转一整圈）
+        void AnimateYaw(double target)
+        {
+            double cur = ((AxisAngleRotation3D)_yaw.Rotation).Angle;
+            double delta = target - cur;
+            delta = ((delta + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;  // 折到 (-180, 180]
+            double from = target - delta;                               // 与 target 等价、离当前最近的起点
+            var a = new DoubleAnimation(from, target, TimeSpan.FromMilliseconds(300));
+            a.EasingFunction = new QuadraticEase();
+            _yaw.Rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, a);
+        }
+
+        void SetEyes(double scaleY)
+        {
+            if (_eyeScales == null) return;
+            foreach (var s in _eyeScales)
+            {
+                s.ScaleY = scaleY * _nearBoost;   // P0-4 靠近时眼睛放大一点点
+                s.ScaleX = _nearBoost;
+            }
+        }
+
+        // ================= 交互 =================
+
+        // 路线A：按 _bodySquashApplied 对 body 网格做下半部加权形变（t = 1-wy/2：顶 0 → 底 1）。
+        // 纵向：y' = y - s·2.0·t^1.5·wy（底 wy=0 位移恒 0 贴地钉死；赤道下沉 ~0.7s ≈ 5px；顶部 ~1px）
+        // 横向：轻微径向鼓出 s·1.2·t² + 底部加性摊开 s·2.2·t²（果冻"摊脚"，s=0.095 时脚圈 +0.2 units ≈ 7px/侧）
+        // 五官（眼 1.45 / 嘴 1.2 / 腮红）所在高度表面位移 <0.5px，脸绝不变形。
+        // 法线按纵压/横鼓近似逆缩放后归一（s≤0.12 误差不可见）。825 顶点每次 ~微秒级。
+        void ApplyBodySquash()
+        {
+            try
+            {
+                double s = _bodySquashApplied;
+                var pos = _bodyMesh.Positions;
+                var nor = _bodyMesh.Normals;
+                for (int i = 0; i < _bodyBase.Length; i++)
+                {
+                    Point3D p = _bodyBase[i];
+                    double wy = p.Y + 1.0;
+                    double t = 1.0 - wy * 0.5;
+                    if (t < 0) t = 0;
+                    double wv = t * Math.Sqrt(t);
+                    double fy = 1.0 - s * 2.0 * wv;
+                    if (fy < 0.2) fy = 0.2;
+                    double inv = Math.Sqrt(p.X * p.X + p.Z * p.Z);
+                    double bulge = 1.0 + s * 1.2 * t * t;
+                    double spread = s * 2.2 * t * t;
+                    double nx, nz;
+                    if (inv > 1e-6)
+                    {
+                        double k = (inv * bulge + spread) / inv;
+                        nx = p.X * k;
+                        nz = p.Z * k;
+                    }
+                    else { nx = 0; nz = 0; }
+                    pos[i] = new Point3D(nx, p.Y - s * 2.0 * wv * wy, nz);
+                    double fx = inv > 1e-6 ? (inv * bulge + spread) / inv : 1.0;
+                    double nlx = p.X / fx, nly = p.Y / fy, nlz = p.Z / fx;
+                    double len = Math.Sqrt(nlx * nlx + nly * nly + nlz * nlz);
+                    if (len < 1e-9) len = 1;
+                    nor[i] = new Vector3D(nlx / len, nly / len, nlz / len);
+                }
+            }
+            catch (Exception ex) { Log.Write("body squash: " + ex.Message); }
+        }
+
+        void OnDown(object sender, MouseButtonEventArgs e)
+        {
+            var dp = e.GetPosition(this);
+            Log.Write("mouse down at (" + (int)dp.X + "," + (int)dp.Y + ") clickCount=" + e.ClickCount);
+            if (e.ClickCount == 2)
+            {
+                Jump();
+                _dragPending = false;             // 双击不走拖动/单击判定，清掉候选防止泄漏
+                _dragGuard.Stop();
+                e.Handled = true;
+                return;
+            }
+            // FIX-CLICK-2 P0-2：按下只记录候选，不立即开拖——窗口必须一动不动，
+            // 修掉"按下瞬间窗口被拽 1~2px"（既是观感问题也是单击位移失真的源头）
+            //
+            // ⚠ 顺序关键：CaptureMouse() 会同步泵出队列里挂起的 mouse-move（OnMove 重入）！
+            // 实测：远距离移动光标后立刻按下，move 事件还在队列里，若 _downCX 尚未赋值（=0），
+            // 重入的 OnMove 会以 dpx=1156 误 promotion、以 (0,0) 为基准把窗口瞬移出屏。
+            // 因此基准读取必须放在 CaptureMouse 之前，pending 置位放最后。
+            _dragging = false;
+            NativePoint cp0;
+            if (GetCursorPos(out cp0)) { _downCX = cp0.X; _downCY = cp0.Y; }   // P0-1：物理像素基准，先于一切
+            _dragWin = new Point(Left, Top);      // 窗口基准只给拖动用，不参与单击判定
+            _dragMouse = new Point(_downCX, _downCY);   // P0-1：物理像素，弃用 PointToScreen
+            _downClock = _clock;                  // 记录按下时刻
+            _dragStartTop = Top;                  // 松手下落用
+            CaptureMouse();                       // 快速拖动不丢事件（可能同步重入 OnMove：此时基准已就绪，dpx=0 安全）
+            _dragPending = true;
+            _dragMouse = new Point(cp0.X, cp0.Y); // P0-1：也用物理像素，弃用 PointToScreen（窗口跳位污染基准）
+            _dragVX = 0; _dragVY = 0; _dragLastT = 0;   // 弹珠模式：每次按下重置速度基准
+            _ballFlight = false; _ballVX = 0; _ballVY = 0;   // 飞行中再被抓住 → 立刻刹停，交回鼠标
+            if (_state == State.Walk)
+            {
+                _state = State.Idle;              // 抓起时打断行走，避免 Tick 抢位置
+                _stateTimer = IdleMin;
+            }
+            _dragGuard.Stop();
+            _dragGuard.Start();                   // P0-1：500ms 后仍未松手且没拖动 → 兜底判单击
+        }
+
+        void OnDragEnd(object sender, MouseButtonEventArgs e)
+        {
+            if (!_dragging && !_dragPending) return;   // 菜单等子元素的 up 不参与判定；pending 也要收尾判单击
+            EndDrag();
+        }
+
+        void OnLostCapture(object sender, MouseEventArgs e)
+        {
+            if (_dragging || _dragPending)   // 捕获被抢/释放 → 立刻收尾，绝不允许卡在 dragging/pending
+            {
+                Log.Write("lost mouse capture -> end drag");
+                EndDrag();
+            }
+        }
+
+        // FIX-CLICK-2 P0-3：单击位移唯一判定入口——按下/当前物理像素差换算 DIP；up 路径与 guard 兜底共用。
+        // P0-1：基准是 GetCursorPos 原值（_downCX/_downCY），与窗口跳位、PointToScreen 彻底脱钩
+        double ClickDistDip()
+        {
+            NativePoint cp;
+            if (!GetCursorPos(out cp)) return -1;
+            var src = PresentationSource.FromVisual(this);
+            double scale = src != null ? src.CompositionTarget.TransformToDevice.M11 : 1.0;
+            return Math.Sqrt(Math.Pow(cp.X - _downCX, 2) + Math.Pow(cp.Y - _downCY, 2)) / scale;
+        }
+
+        // P0-3：阈值 5→8 DIP（本机空点抖动实测 1.6~2 DIP，125% 缩放下留足余量）
+        bool IsClick() { double d = ClickDistDip(); return d >= 0 && d < 8.0 && (_clock - _downClock) * 1000 < 400; }
+
+        // 进入弹珠模式：脱离鼠标，带着当前速度自由飞，Ticker 里每帧撞壁反弹 + 摩擦减速
+        void StartBallFlight(double vx, double vy)
+        {
+            // 初速封顶：手快甩出的瞬时速度能到 3000+ DIP/s，不封顶会飞得太夸张
+            double sp0 = Math.Sqrt(vx * vx + vy * vy);
+            if (sp0 > BallMaxSpeed)
+            {
+                vx = vx / sp0 * BallMaxSpeed;
+                vy = vy / sp0 * BallMaxSpeed;
+            }
+            _ballFlight = true;
+            _ballVX = vx;
+            _ballVY = vy;
+            _dragPending = false;
+            _dragging = false;
+            if (_dragGuard != null) _dragGuard.Stop();
+            if (IsMouseCaptured) ReleaseMouseCapture();
+            _state = State.Idle;
+            _stateTimer = IdleMin + _rand.NextDouble() * (IdleMax - IdleMin);
+            _pinTimer = 0;
+            Log.Write("ball launch vx=" + Math.Round(vx) + " vy=" + Math.Round(vy));
+        }
+
+        // 每帧飞行积分：四壁反弹（衰减 20%）+ 摩擦减速 + 撞壁给一点果冻形变
+        void TickBallFlight(double dt)
+        {
+            var wa = WorkArea();
+            double nx = Left + _ballVX * dt;
+            double ny = Top + _ballVY * dt;
+            bool bounced = false;
+            if (nx < wa.Left) { nx = wa.Left; _ballVX = -_ballVX * BallWallDamp; bounced = true; }
+            else if (nx + Width > wa.Right) { nx = wa.Right - Width; _ballVX = -_ballVX * BallWallDamp; bounced = true; }
+            if (ny < wa.Top) { ny = wa.Top; _ballVY = -_ballVY * BallWallDamp; bounced = true; }
+            else if (ny + Height > wa.Bottom) { ny = wa.Bottom - Height; _ballVY = -_ballVY * BallWallDamp; bounced = true; }
+            Left = nx;
+            Top = ny;
+            if (bounced)
+            {
+                _squashV += 0.35;             // 复用落地那套弹簧，撞墙也"咚"一下
+                if (_squashV > 0.9) _squashV = 0.9;
+                _lastImpact = _clock;
+                Log.Write("ball wall vx=" + Math.Round(_ballVX) + " vy=" + Math.Round(_ballVY));
+            }
+            double sp = Math.Sqrt(_ballVX * _ballVX + _ballVY * _ballVY);
+            double f = sp > 0 ? Math.Max(0.0, sp - BallFriction * dt) / sp : 0.0;
+            _ballVX *= f;
+            _ballVY *= f;
+            sp = Math.Sqrt(_ballVX * _ballVX + _ballVY * _ballVY);
+            if (sp < BallStopSpeed)
+            {
+                _ballFlight = false;
+                _ballVX = _ballVY = 0;
+                _pinTimer = 1.0;
+                EnterIdle();
+                Log.Write("ball stop");
+            }
+        }
+
+        // 统一收尾：单击判定（IsClick → 转正），否则视为拖动钉住
+        void EndDrag()
+        {
+            _dragGuard.Stop();
+            _dragPending = false;
+            _dragging = false;
+            double distDip, ms; bool click;
+            try
+            {
+                distDip = ClickDistDip();               // P0-1：取坐标必须在释放捕获之前——释放会引起一次坐标刷新
+                ms = (_clock - _downClock) * 1000.0;
+                click = IsClick();
+            }
+            catch (Exception ex) { Log.Write("click calc: " + ex.GetType().Name + " " + ex.Message); distDip = -1; ms = 0; click = false; }
+            if (IsMouseCaptured) ReleaseMouseCapture(); // P0-1：放最后
+            try
+            {
+                Log.Write("mouse up distDIP=" + Math.Round(distDip, 1) +
+                          " ms=" + (int)ms + " -> click=" + click);
+                if (click)
+                    FaceFront();
+                else
+                {
+                    _pinTimer = 1.5;   // P0-4：真拖动放下后钉住 1.5s，避免立刻走开
+                    // 弹珠模式：松手时速度够大就直接扔出去（后面撞壁会自己弹），否则走原来的"自由落体"
+                    if (Math.Abs(_dragVX) > BallThrowSpeed || Math.Abs(_dragVY) > BallThrowSpeed)
+                    {
+                        StartBallFlight(_dragVX, _dragVY);
+                        _pinTimer = 1.5;
+                        return;
+                    }
+
+                    // FIX-GROUND P0-3 松手下落：离地高度 = 3D 高度 + 拖起时窗口上移量换算；
+                    // h0 < 0.02（贴地松手）直接跳过
+                    try
+                    {
+                        double h0 = Math.Max(0, _hop.OffsetY + _jump.OffsetY)
+                            + Math.Max(0, _dragStartTop - Top) * 2.0 / Math.Max(1.0, Height);
+                        if (h0 >= 0.02)
+                        {
+                            int fallMs = (int)Math.Max(120, Math.Min(350, h0 * 250));
+                            _jump.BeginAnimation(TranslateTransform3D.OffsetYProperty, null);
+                            _jump.OffsetY = 0;
+                            var fa = new DoubleAnimation(h0, 0, TimeSpan.FromMilliseconds(fallMs))
+                            {
+                                FillBehavior = FillBehavior.Stop
+                            };
+                            fa.Completed += delegate
+                            {
+                                try
+                                {
+                                    _jump.BeginAnimation(TranslateTransform3D.OffsetYProperty, null);
+                                    _jump.OffsetY = 0;
+                                }
+                                catch { }
+                            };
+                            _jump.BeginAnimation(TranslateTransform3D.OffsetYProperty, fa);
+                            Log.Write("drag drop h0=" + Math.Round(h0, 2) + " ms=" + ms);
+                        }
+                    }
+                    catch (Exception ex) { Log.Write("drag drop: " + ex.Message); }
+                }
+            }
+            catch (Exception ex) { Log.Write("drag end: " + ex.Message); }
+        }
+
+        // 单击转正：面向镜头（yaw -> 0），1.5 秒内不重新闲逛；顺带唤醒
+        public void FaceFront()
+        {
+            FaceFrontCore(true);        // 鼠标路径：受 _wakeSuppressUntil 抑制
+        }
+
+        // fromMouse=false 供 /pet/face、MCP pet_face 调用，不受抑制
+        public void FaceFrontCore(bool fromMouse)
+        {
+            try
+            {
+                if (fromMouse && _clock < _wakeSuppressUntil) return;
+                if (_state == State.Walk)
+                {
+                    _state = State.Idle;
+                    _stateTimer = IdleMin;
+                }
+                if (_state == State.Doze)
+                    Wake();             // 睡眠态点击必醒：Wake 内部 SetMood("neutral") 复位闭眼/Zzz
+                // FIX-TURN P0-3：转圈途中点击只唤醒，朝向交给转圈自己收尾——
+                // 此时强行 AnimateYaw(0) 会从中间角度（如 200°）倒回，又是反向转
+                if (Environment.TickCount >= _turnUntil)
+                {
+                    Log.Write("click yaw base=" + Math.Round(((AxisAngleRotation3D)_yaw.Rotation).Angle, 1));
+                    AnimateYaw(0);      // 复用现有 300ms 二次缓动（最短路径）
+                }
+                _pinTimer = 1.5;        // 避免刚转正就又侧身走开
+                Log.Write("click -> face front (yaw -> 0)");
+            }
+            catch (Exception ex) { Log.Write("face front: " + ex.Message); }
+        }
+
+        // 菜单「睡眠」：随时可睡，不必等 5 分钟自然休眠
+        public void EnterDoze()
+        {
+            _lastInteract = _clock;
+            if (_state == State.Walk) EnterIdle();
+            SetMood("doze");
+            _pinTimer = 0;
+            _wakeSuppressUntil = _clock + 0.8;   // 菜单 up 冒泡窗口，别把它自己点醒
+            Log.Write("menu -> doze");
+        }
+
+        void OpenUrl()
+        {
+            try
+            {
+                System.Diagnostics.Process.Start("https://www.doubao.com");
+            }
+            catch (Exception ex)
+            {
+                System.Windows.MessageBox.Show("无法打开浏览器: " + ex.Message);
+            }
+        }
+
+        void OnMove(object sender, MouseEventArgs e)
+        {
+            // 松键清理：只在按键确实松开时复位（CaptureMouse 会合成一次 OnMove——
+            // 若在"按键未按下"判断之外再判 !_dragging，pending 态会在按下期间被误清，单击判定全灭）
+            if (e.LeftButton != MouseButtonState.Pressed)
+            {
+                _dragPending = false;
+                _dragging = false;
+                if (IsMouseCaptured) ReleaseMouseCapture();
+                return;
+            }
+            // FIX-CLICK-2 P0-2：延迟拖动——按下后首次移动超过 4 DIP 才真正开拖；
+            // 抖动期间窗口一动不动（按下到松手 Left/Top 必须零变化）
+            if (_dragPending)
+            {
+                NativePoint cm;
+                if (GetCursorPos(out cm))
+                {
+                    var src0 = PresentationSource.FromVisual(this);
+                    double scale0 = src0 != null ? src0.CompositionTarget.TransformToDevice.M11 : 1.0;
+                    double dpx = Math.Sqrt(Math.Pow(cm.X - _downCX, 2) + Math.Pow(cm.Y - _downCY, 2));
+                    if (dpx > 4.0 * scale0)
+                    {
+                        _dragging = true;
+                        _dragPending = false;
+                        _dragWin = new Point(Left, Top);
+                        // 基准用"按下时刻"光标位而非当前位置：WPF 会合并快速移动成一次 OnMove，
+                        // 若以当前位置为基准，单次跳变的拖动位移恒为零（窗口不跟手）。
+                        // pending 期间窗口纹丝不动 → (按下窗口位, 按下光标位) 是自洽基准
+                        _dragMouse = new Point(_downCX, _downCY);
+                    }
+                }
+                if (_dragPending) return;   // 仍处候选态：忽略抖动，绝不能落进后面的清理/拖动分支
+            }
+            if (!_dragging) return;
+            // P0-1：拖动也用真实屏幕坐标——捕获状态下 e.GetPosition 可能携带陈旧位置
+            //（合成 move 会按陈旧基准让窗口瞬移，本轮"点击后窗口跳 625px、后续点击全落空"的元凶）。
+            // promotion 判定用 GetCursorPos 实时值，天然不受合成事件影响
+            NativePoint cm2;
+            if (!GetCursorPos(out cm2)) return;
+            var src1 = PresentationSource.FromVisual(this);
+            double scale1 = src1 != null ? src1.CompositionTarget.TransformToDevice.M11 : 1.0;
+            Left = _dragWin.X + (cm2.X - _dragMouse.X) / scale1;
+            Top = _dragWin.Y + (cm2.Y - _dragMouse.Y) / scale1;
+
+            // 记录拖动速度（指数平滑），供"甩到边界就弹出去"用
+            if (_dragLastT > 0)
+            {
+                double ddt = _clock - _dragLastT;
+                if (ddt > 0.002 && ddt < 0.35)
+                {
+                    _dragVX = _dragVX * 0.6 + ((Left - _dragLastX) / ddt) * 0.4;
+                    _dragVY = _dragVY * 0.6 + ((Top - _dragLastY) / ddt) * 0.4;
+                }
+            }
+            _dragLastX = Left; _dragLastY = Top; _dragLastT = _clock;
+
+            // 撞到工作区边界：速度够大就脱手当弹珠弹出去；速度小就照旧让 tick 里的吸附贴住
+            var wa = WorkArea();
+            bool hitWall = false;
+            if (Left <= wa.Left && _dragVX < -BallLaunchSpeed) { Left = wa.Left; hitWall = true; }
+            else if (Left + Width >= wa.Right && _dragVX > BallLaunchSpeed) { Left = wa.Right - Width; hitWall = true; }
+            if (Top <= wa.Top && _dragVY < -BallLaunchSpeed) { Top = wa.Top; hitWall = true; }
+            else if (Top + Height >= wa.Bottom && _dragVY > BallLaunchSpeed) { Top = wa.Bottom - Height; hitWall = true; }
+            if (hitWall)
+            {
+                double nvx = _dragVX, nvy = _dragVY;
+                if (Left <= wa.Left && nvx < 0) nvx = -nvx * BallWallDamp;
+                else if (Left + Width >= wa.Right && nvx > 0) nvx = -nvx * BallWallDamp;
+                if (Top <= wa.Top && nvy < 0) nvy = -nvy * BallWallDamp;
+                else if (Top + Height >= wa.Bottom && nvy > 0) nvy = -nvy * BallWallDamp;
+                StartBallFlight(nvx, nvy);
+            }
+        }
+
+        void Jump()
+        {
+            if (_state == State.Walk) EnterIdle();
+
+            // 跳到顶时球顶已贴到窗口上沿，气泡没地方放会压到脸上：跳跃期间藏起气泡，落地淡回
+            bool hideBubble = _bubble != null && _bubble.Visibility == Visibility.Visible;
+            if (hideBubble) _bubble.Opacity = 0;
+
+            var kf = new DoubleAnimationUsingKeyFrames();
+
+            // 放慢弹跳：起跳 300ms、下落回弹 800ms（原 200/520），触地间隔随比例放大仍 > 0.15s 闸门
+            var up = new EasingDoubleKeyFrame(0.72, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(300)));
+            up.EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut };
+            kf.KeyFrames.Add(up);
+
+            var down = new EasingDoubleKeyFrame(0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(800)));
+            down.EasingFunction = new BounceEase { Bounces = 2, Bounciness = 2, EasingMode = EasingMode.EaseOut };
+            kf.KeyFrames.Add(down);
+
+            if (hideBubble)
+            {
+                kf.Completed += delegate
+                {
+                    // 气泡还在有效期内就淡回来，已经过期则保持隐藏
+                    if (_bubble.Visibility == Visibility.Visible) _bubble.Opacity = 1;
+                };
+            }
+
+            _jump.BeginAnimation(TranslateTransform3D.OffsetYProperty, kf);
+        }
+    }
+
+    // ============================================================================
+    // 本地控制服务：迷你 HTTP 服务器（TcpListener 实现，无任何外部依赖）
+    // 供豆包等外部程序通过 http://127.0.0.1:8787 控制桌宠
+    // ============================================================================
+    public class ControlServer
+    {
+        const int DefaultPort = 8787;
+
+        readonly PetWindow _pet;
+        TcpListener _listener;
+
+        public int Port { get; private set; }
+
+        public ControlServer(PetWindow pet)
+        {
+            _pet = pet;
+            Port = -1;
+        }
+
+        public void Start()
+        {
+            // 端口被占用时依次向后尝试
+            for (int p = DefaultPort; p < DefaultPort + 10; p++)
+            {
+                try
+                {
+                    _listener = new TcpListener(IPAddress.Loopback, p);
+                    _listener.Start();
+                    Port = p;
+                    _listener.BeginAcceptTcpClient(OnAccept, null);
+                    return;
+                }
+                catch { }
+            }
+        }
+
+        void OnAccept(IAsyncResult ar)
+        {
+            TcpClient client;
+            try { client = _listener.EndAcceptTcpClient(ar); }
+            catch { return; }
+            try { _listener.BeginAcceptTcpClient(OnAccept, null); }
+            catch { }
+
+            // 安全：仅接受本机回环连接，拒绝外部 IP
+            var remote = client.Client.RemoteEndPoint as IPEndPoint;
+            if (remote == null || !IPAddress.IsLoopback(remote.Address))
+            {
+                client.Close();
+                return;
+            }
+
+            try { Handle(client); }
+            catch (Exception ex) { Log.Write("handle: " + ex.Message); }
+        }
+
+        void Handle(TcpClient client)
+        {
+            using (client)
+            {
+                var stream = client.GetStream();
+                stream.ReadTimeout = 3000;
+                string request = ReadAll(stream);
+                string[] lines = request.Replace("\r\n", "\n").Split('\n');
+                if (lines.Length == 0) return;
+                var seg = lines[0].Split(' ');
+                if (seg.Length < 2) return;
+
+                string method = seg[0];
+                string fullPath = seg[1];
+                string path = fullPath;
+                string query = "";
+                int q = fullPath.IndexOf('?');
+                if (q >= 0)
+                {
+                    path = fullPath.Substring(0, q);
+                    query = fullPath.Substring(q + 1);
+                }
+
+                // 请求体（JSON）
+                string body = "";
+                int hIdx = request.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+                if (hIdx >= 0 && request.Length > hIdx + 4)
+                    body = request.Substring(hIdx + 4);
+
+                // CORS 预检
+                if (method == "OPTIONS")
+                {
+                    WriteResponse(stream, 204, "");
+                    return;
+                }
+
+                // P0-8：API 请求行入日志
+                Log.Write(method + " " + fullPath);
+
+                // P0-6：任何 API 调用视为交互，唤醒
+                _pet.Dispatcher.BeginInvoke(new Action(_pet.Wake));
+
+                // MCP（豆包等自定义连接器走 JSON-RPC），与 REST 共存自动识别
+                if (body.Contains("\"jsonrpc\""))
+                {
+                    McpHandle(stream, body);
+                    return;
+                }
+
+                int code = 200;
+                string data;
+                switch (path)
+                {
+                    case "/":
+                        data = "{\"endpoints\":[\"GET /pet/port\",\"GET /status\",\"POST /pet/chat\",\"POST /pet/action\",\"POST /pet/visible\",\"POST /pet/move\",\"POST /pet/mood\",\"POST /pet/pause\",\"POST /pet/face\",\"POST /jump\",\"POST /walk?dir=1&seconds=5\",\"POST /idle\"]}";
+                        break;
+
+                    case "/pet/port":
+                        data = "{\"port\":" + Port + "}";
+                        break;
+
+                    case "/status":
+                        data = (string)_pet.Dispatcher.Invoke(new Func<string>(_pet.ApiStatus));
+                        break;
+
+                    case "/pet/chat":
+                        if (method != "POST") { code = 405; data = "{}"; break; }
+                        {
+                            string text = ExtractString(body, "text");
+                            if (text.Length == 0) { code = 400; data = "{}"; break; }
+                            string t = text;
+                            _pet.Dispatcher.BeginInvoke(new Action(delegate { _pet.ApiChat(t); }));
+                            data = "{}";
+                        }
+                        break;
+
+                    case "/pet/action":
+                        if (method != "POST") { code = 405; data = "{}"; break; }
+                        {
+                            string act = ExtractString(body, "action");
+                            if (!(bool)_pet.Dispatcher.Invoke(new Func<string, bool>(_pet.ApiAction), act))
+                            {
+                                code = 400;
+                                data = "{}";
+                                break;
+                            }
+                            data = "{\"action\":\"" + act.ToLowerInvariant() + "\"}";
+                        }
+                        break;
+
+                    case "/pet/visible":
+                        if (method != "POST") { code = 405; data = "{}"; break; }
+                        {
+                            bool show = ExtractBool(body, "show", true);
+                            bool s = show;
+                            _pet.Dispatcher.BeginInvoke(new Action(delegate { _pet.ApiSetVisible(s); }));
+                            data = "{\"show\":" + (show ? "true" : "false") + "}";
+                        }
+                        break;
+
+                    case "/pet/move":
+                        if (method != "POST") { code = 405; data = "{}"; break; }
+                        {
+                            double mx, my;
+                            if (!TryExtractNumber(body, "x", out mx) || !TryExtractNumber(body, "y", out my))
+                            {
+                                code = 400;
+                                data = "{}";
+                                break;
+                            }
+                            double dx = mx, dy = my;
+                            _pet.Dispatcher.BeginInvoke(new Action(delegate { _pet.ApiMoveTo(dx, dy); }));
+                            data = "{\"x\":" + mx + ",\"y\":" + my + "}";
+                        }
+                        break;
+
+                    case "/pet/mood":
+                        if (method != "POST") { code = 405; data = "{}"; break; }
+                        {
+                            string mood = ExtractString(body, "mood");
+                            bool ok = (bool)_pet.Dispatcher.Invoke(
+                                new Func<string, bool>(_pet.SetMood), mood);
+                            if (!ok)
+                            {
+                                // 规范要求：非法 mood 返回 {"code":1,"msg":"unknown mood"}，不许崩
+                                WriteResponse(stream, 200,
+                                    "{\"code\":1,\"msg\":\"unknown mood\",\"data\":{}}");
+                                return;
+                            }
+                            data = "{\"mood\":\"" + mood.ToLowerInvariant() + "\"}";
+                        }
+                        break;
+
+                    case "/pet/pause":
+                        if (method != "POST") { code = 405; data = "{}"; break; }
+                        {
+                            bool on = ExtractBool(body, "on", false);
+                            _pet.Dispatcher.Invoke(new Action<bool>(_pet.ApiPause), on);
+                            data = "{\"pause\":" + (on ? "true" : "false") + "}";
+                        }
+                        break;
+
+                    case "/pet/face":
+                        if (method != "POST") { code = 405; data = "{}"; break; }
+                        _pet.Dispatcher.Invoke(new Action(() => _pet.FaceFrontCore(false)));
+                        data = "{\"face\":\"front\"}";
+                        break;
+
+                    case "/jump":
+                        if (method != "POST") { code = 405; data = "{}"; break; }
+                        _pet.Dispatcher.BeginInvoke(new Action(_pet.ApiJump));
+                        data = "{\"action\":\"jump\"}";
+                        break;
+
+                    case "/walk":
+                        if (method != "POST") { code = 405; data = "{}"; break; }
+                        {
+                            double dir = GetQueryDouble(query, "dir", 1.0);
+                            double seconds = GetQueryDouble(query, "seconds", 5.0);
+                            double d = dir, sec = seconds;
+                            _pet.Dispatcher.BeginInvoke(new Action(delegate { _pet.ApiWalk(d, sec); }));
+                            data = "{\"action\":\"walk\",\"dir\":" + (dir >= 0 ? 1 : -1) + ",\"seconds\":" + seconds + "}";
+                        }
+                        break;
+
+                    case "/idle":
+                        if (method != "POST") { code = 405; data = "{}"; break; }
+                        _pet.Dispatcher.BeginInvoke(new Action(_pet.ApiIdle));
+                        data = "{\"action\":\"idle\"}";
+                        break;
+
+                    default:
+                        code = 404;
+                        data = "{}";
+                        break;
+                }
+
+                string json = code == 200
+                    ? "{\"code\":0,\"msg\":\"ok\",\"data\":" + data + "}"
+                    : "{\"code\":" + (code == 400 ? 400 : code == 404 ? 404 : code == 405 ? 405 : 1) +
+                      ",\"msg\":\"" + (code == 400 ? "bad request" : code == 404 ? "not found" : "method not allowed") +
+                      "\",\"data\":" + data + "}";
+                WriteResponse(stream, code, json);
+            }
+        }
+
+        // ================= MCP（豆包自定义连接器）============================
+        // 豆包自定义连接器走 MCP 协议（JSON-RPC over HTTP）。
+        // 同一端口自动识别：请求体含 "jsonrpc" 即按 MCP 处理，否则走 REST。
+
+        void McpHandle(NetworkStream stream, string body)
+        {
+            string rpcId = ExtractRawValue(body, "id");
+            string rpcMethod = ExtractString(body, "method");
+
+            // P0-8 / P0-6：记录 + 唤醒
+            Log.Write("mcp " + rpcMethod);
+            _pet.Dispatcher.BeginInvoke(new Action(_pet.Wake));
+
+            // 通知类请求（无 id）不需要响应
+            if (rpcId.Length == 0)
+            {
+                WriteResponse(stream, 202, "");
+                return;
+            }
+
+            string result;
+            bool isError = false;
+            switch (rpcMethod)
+            {
+                case "initialize":
+                    result = "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}}," +
+                             "\"serverInfo\":{\"name\":\"desktop-pet\",\"version\":\"1.1.0\"}}";
+                    break;
+
+                case "ping":
+                    result = "{}";
+                    break;
+
+                case "tools/list":
+                    result = McpToolsList();
+                    break;
+
+                case "tools/call":
+                    result = McpToolsCall(body, out isError);
+                    break;
+
+                default:
+                    WriteRpcError(stream, rpcId, -32601, "method not found: " + rpcMethod);
+                    return;
+            }
+
+            string payload = "{\"jsonrpc\":\"2.0\",\"id\":" + rpcId +
+                             ",\"result\":" + result + "}";
+            WriteResponse(stream, 200, payload);
+        }
+
+        string McpToolsList()
+        {
+            return "{\"tools\":[" +
+                McpTool("pet_chat", "让桌宠头顶弹出文字气泡（3秒后消失）",
+                    "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"气泡显示的文字\"}},\"required\":[\"text\"]}") + "," +
+                McpTool("pet_action", "触发桌宠动作动画",
+                    "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"idle\",\"bounce\",\"shake\",\"turn\",\"blush\"],\"description\":\"idle=待机,bounce=弹跳,shake=摇头,turn=转圈,blush=害羞\"}},\"required\":[\"action\"]}") + "," +
+                McpTool("pet_visible", "显示或隐藏桌宠",
+                    "{\"type\":\"object\",\"properties\":{\"show\":{\"type\":\"boolean\",\"description\":\"true显示,false隐藏\"}},\"required\":[\"show\"]}") + "," +
+                McpTool("pet_move", "平滑移动桌宠到屏幕坐标（自动限制不出屏幕）",
+                    "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\",\"description\":\"屏幕X坐标\"},\"y\":{\"type\":\"number\",\"description\":\"屏幕Y坐标\"}},\"required\":[\"x\",\"y\"]}") + "," +
+                McpTool("pet_mood", "设置桌宠情绪（影响眼睛/腮红/浮动姿态）",
+                    "{\"type\":\"object\",\"properties\":{\"mood\":{\"type\":\"string\",\"enum\":[\"happy\",\"shy\",\"curious\",\"sleepy\",\"doze\",\"neutral\"],\"description\":\"happy开心,shy害羞,curious好奇,sleepy犯困,doze打盹,neutral平常\"}},\"required\":[\"mood\"]}") + "," +
+                McpTool("pet_pause", "暂停/恢复桌宠自动闲逛（移动等手动指令不受影响）",
+                    "{\"type\":\"object\",\"properties\":{\"on\":{\"type\":\"boolean\",\"description\":\"true=暂停闲逛，false=恢复\"}},\"required\":[\"on\"]}") + "," +
+                McpTool("pet_face", "让桌宠转身面向镜头（yaw 归零），随后 1.5 秒内不闲逛",
+                    "{\"type\":\"object\",\"properties\":{}}") + "," +
+                McpTool("pet_status", "查询桌宠状态（待机/行走、屏幕坐标、是否可见）",
+                    "{\"type\":\"object\",\"properties\":{}}") +
+                "]}";
+        }
+
+        static string McpTool(string name, string desc, string schema)
+        {
+            return "{\"name\":\"" + name + "\",\"description\":\"" + desc +
+                   "\",\"inputSchema\":" + schema + "}";
+        }
+
+        string McpToolsCall(string body, out bool isError)
+        {
+            isError = false;
+            string name = ExtractString(body, "name");
+
+            // 参数在 params.arguments 内，把搜索范围切过去
+            int ai = body.IndexOf("\"arguments\"", StringComparison.Ordinal);
+            string args = ai >= 0 ? body.Substring(ai) : body;
+
+            string text;
+            switch (name)
+            {
+                case "pet_chat":
+                    {
+                        string t = ExtractString(args, "text");
+                        if (t.Length == 0)
+                        {
+                            isError = true;
+                            return McpText("缺少 text 参数");
+                        }
+                        _pet.Dispatcher.BeginInvoke(new Action(delegate { _pet.ApiChat(t); }));
+                        text = "桌宠正在说：" + t;
+                        break;
+                    }
+                case "pet_action":
+                    {
+                        string act = ExtractString(args, "action");
+                        if (!(bool)_pet.Dispatcher.Invoke(new Func<string, bool>(_pet.ApiAction), act))
+                        {
+                            isError = true;
+                            return McpText("未知动作：" + act);
+                        }
+                        text = "动作已执行：" + act.ToLowerInvariant();
+                        break;
+                    }
+                case "pet_visible":
+                    {
+                        bool show = ExtractBool(args, "show", true);
+                        bool s = show;
+                        _pet.Dispatcher.BeginInvoke(new Action(delegate { _pet.ApiSetVisible(s); }));
+                        text = show ? "桌宠已显示" : "桌宠已隐藏";
+                        break;
+                    }
+                case "pet_move":
+                    {
+                        double mx, my;
+                        if (!TryExtractNumber(args, "x", out mx) || !TryExtractNumber(args, "y", out my))
+                        {
+                            isError = true;
+                            return McpText("缺少 x/y 参数");
+                        }
+                        double dx = mx, dy = my;
+                        _pet.Dispatcher.BeginInvoke(new Action(delegate { _pet.ApiMoveTo(dx, dy); }));
+                        text = "桌宠正在移动到 (" + mx + ", " + my + ")";
+                        break;
+                    }
+                case "pet_mood":
+                    {
+                        string mood = ExtractString(args, "mood");
+                        if (!(bool)_pet.Dispatcher.Invoke(new Func<string, bool>(_pet.SetMood), mood))
+                        {
+                            isError = true;
+                            return McpText("unknown mood: " + mood);
+                        }
+                        text = "情绪已切换：" + mood.ToLowerInvariant();
+                        break;
+                    }
+                case "pet_pause":
+                    {
+                        bool on = ExtractBool(args, "on", false);
+                        _pet.Dispatcher.Invoke(new Action<bool>(_pet.ApiPause), on);
+                        text = on ? "闲逛已暂停，它会老实待着" : "闲逛已恢复";
+                        break;
+                    }
+                case "pet_face":
+                    _pet.Dispatcher.Invoke(new Action(() => _pet.FaceFrontCore(false)));
+                    text = "已转身面向镜头";
+                    break;
+                case "pet_status":
+                    text = (string)_pet.Dispatcher.Invoke(new Func<string>(_pet.ApiStatus));
+                    break;
+                default:
+                    isError = true;
+                    return McpText("未知工具：" + name);
+            }
+            return McpText(text);
+        }
+
+        static string McpText(string text)
+        {
+            return "{\"content\":[{\"type\":\"text\",\"text\":\"" + EscapeJson(text) + "\"}],\"isError\":false}";
+        }
+
+        static void WriteRpcError(NetworkStream stream, string rpcId, int code, string message)
+        {
+            var payload = "{\"jsonrpc\":\"2.0\",\"id\":" + rpcId +
+                          ",\"error\":{\"code\":" + code + ",\"message\":\"" + message + "\"}}";
+            WriteResponse(stream, 200, payload);
+        }
+
+        static string EscapeJson(string s)
+        {
+            var sb = new StringBuilder(s.Length + 8);
+            foreach (char c in s)
+            {
+                switch (c)
+                {
+                    case '"': sb.Append("\\\""); break;
+                    case '\\': sb.Append("\\\\"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default: sb.Append(c); break;
+                }
+            }
+            return sb.ToString();
+        }
+
+
+        // ================= 极简 JSON 解析（值提取） =================
+
+        static string ExtractString(string json, string key)
+        {
+            if (json == null) return "";
+            var m = FindValueStart(json, key);
+            if (m < 0 || json[m] != '"') return "";
+            var sb = new StringBuilder();
+            int i = m + 1;
+            while (i < json.Length)
+            {
+                char c = json[i];
+                if (c == '\\' && i + 1 < json.Length)
+                {
+                    char n = json[i + 1];
+                    if (n == 'n') sb.Append('\n');
+                    else if (n == 't') sb.Append('\t');
+                    else sb.Append(n);
+                    i += 2;
+                    continue;
+                }
+                if (c == '"') break;
+                sb.Append(c);
+                i++;
+            }
+            return sb.ToString();
+        }
+
+        static bool TryExtractNumber(string json, string key, out double value)
+        {
+            value = 0;
+            var m = FindValueStart(json, key);
+            if (m < 0 || m >= json.Length) return false;
+            int end = m;
+            while (end < json.Length && (char.IsDigit(json[end]) || json[end] == '-' || json[end] == '+' ||
+                   json[end] == '.' || json[end] == 'e' || json[end] == 'E'))
+                end++;
+            return double.TryParse(json.Substring(m, end - m),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out value);
+        }
+
+        static bool ExtractBool(string json, string key, bool fallback)
+        {
+            var m = FindValueStart(json, key);
+            if (m < 0) return fallback;
+            if (json.Substring(m).StartsWith("false", StringComparison.OrdinalIgnoreCase)) return false;
+            if (json.Substring(m).StartsWith("true", StringComparison.OrdinalIgnoreCase)) return true;
+            return fallback;
+        }
+
+        // 返回 "key" 对应值的原始文本（字符串含引号原样保留，数字/布尔取到值结尾）
+        static string ExtractRawValue(string json, string key)
+        {
+            if (json == null) return "";
+            int m = FindValueStart(json, key);
+            if (m < 0 || m >= json.Length) return "";
+            if (json[m] == '"')
+            {
+                int i = m + 1;
+                while (i < json.Length)
+                {
+                    if (json[i] == '\\') { i += 2; continue; }
+                    if (json[i] == '"') return json.Substring(m, i - m + 1);
+                    i++;
+                }
+                return "";
+            }
+            int end = m;
+            while (end < json.Length && json[end] != ',' && json[end] != '}' && json[end] != ' ')
+                end++;
+            return json.Substring(m, end - m);
+        }
+
+        // 返回 "key" 对应值的起始下标
+        static int FindValueStart(string json, string key)
+        {
+            string pattern = "\"" + key + "\"";
+            int k = json.IndexOf(pattern, StringComparison.Ordinal);
+            if (k < 0) return -1;
+            int i = k + pattern.Length;
+            while (i < json.Length && (json[i] == ' ' || json[i] == ':')) i++;
+            return i;
+        }
+
+
+        static double GetQueryDouble(string query, string key, double fallback)
+        {
+            foreach (var kv in query.Split('&'))
+            {
+                int eq = kv.IndexOf('=');
+                if (eq <= 0) continue;
+                if (string.Equals(kv.Substring(0, eq), key, StringComparison.OrdinalIgnoreCase))
+                {
+                    double v;
+                    if (double.TryParse(kv.Substring(eq + 1), out v)) return v;
+                }
+            }
+            return fallback;
+        }
+
+        static string ReadAll(NetworkStream s)
+        {
+            var ms = new MemoryStream();
+            var buf = new byte[4096];
+            while (true)
+            {
+                int n;
+                try { n = s.Read(buf, 0, buf.Length); }
+                catch { break; }
+                if (n <= 0) break;
+                ms.Write(buf, 0, n);
+
+                string soFar = Encoding.UTF8.GetString(ms.ToArray());
+                int idx = soFar.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+                if (idx >= 0)
+                {
+                    int contentLen = 0;
+                    var headerBlock = soFar.Substring(0, idx);
+                    var headerLines = headerBlock.Split(new[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
+                    foreach (var line in headerLines)
+                    {
+                        if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                            int.TryParse(line.Substring(15).Trim(), out contentLen);
+                    }
+                    if (ms.Length >= idx + 4 + contentLen) break;
+                }
+                if (ms.Length > 65536) break;
+            }
+            return Encoding.UTF8.GetString(ms.ToArray());
+        }
+
+        static void WriteResponse(NetworkStream s, int code, string body)
+        {
+            string reason;
+            switch (code)
+            {
+                case 200: reason = "OK"; break;
+                case 204: reason = "No Content"; break;
+                case 400: reason = "Bad Request"; break;
+                case 404: reason = "Not Found"; break;
+                case 405: reason = "Method Not Allowed"; break;
+                default: reason = "OK"; break;
+            }
+            var sb = new StringBuilder();
+            sb.Append("HTTP/1.1 ").Append(code).Append(' ').Append(reason).Append("\r\n");
+            sb.Append("Content-Type: application/json; charset=utf-8\r\n");
+            sb.Append("Access-Control-Allow-Origin: *\r\n");
+            sb.Append("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n");
+            sb.Append("Access-Control-Allow-Headers: Content-Type\r\n");
+            var payload = Encoding.UTF8.GetBytes(body);
+            if (code != 204)
+                sb.Append("Content-Length: ").Append(payload.Length).Append("\r\n");
+            sb.Append("Connection: close\r\n\r\n");
+
+            var head = Encoding.UTF8.GetBytes(sb.ToString());
+            s.Write(head, 0, head.Length);
+            if (payload.Length > 0) s.Write(payload, 0, payload.Length);
+            s.Flush();
+        }
+    }
+
+    // ============================================================================
+    // P0-8 日志：exe 同目录 pet.log（追加写，UTF-8），超 2MB 截断重建；
+    // 日志失败绝不影响主流程。
+    // ============================================================================
+    public static class Log
+    {
+        static readonly object _lock = new object();
+        const long MaxBytes = 2 * 1024 * 1024;
+
+        public static void Write(string msg)
+        {
+            try
+            {
+                lock (_lock)
+                {
+                    string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pet.log");
+                    var fi = new FileInfo(path);
+                    if (fi.Exists && fi.Length > MaxBytes)
+                        fi.Delete();
+                    File.AppendAllText(
+                        path,
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + msg + Environment.NewLine,
+                        Encoding.UTF8);
+                }
+            }
+            catch { }
+        }
+    }
+}

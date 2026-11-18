@@ -1,0 +1,16 @@
+# 构建产物
+*.exe
+*.pdb
+*.ilk
+
+# 运行时日志（会记录本机屏幕坐标、鼠标轨迹，不要提交）
+*.log
+
+# 备份文件
+*.bak
+*.bak-*
+
+# 系统垃圾
+Thumbs.db
+desktop.ini
+.DS_Store
