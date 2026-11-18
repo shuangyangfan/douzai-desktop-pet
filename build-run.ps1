@@ -1,8 +1,9 @@
-<#
-  豆仔 · 3D 桌面宠物 —— 一键编译并启动
+﻿<#
+  Douzai - 3D Desktop Pet / 豆仔 · 一键编译并启动
 
   只用 Windows 自带 .NET Framework 4.x 里的 csc.exe，不需要安装任何 SDK。
   同时兼容 Windows PowerShell 5.1 与 PowerShell 7+。
+  本文件必须保存为「UTF-8 带 BOM」，否则 PowerShell 5.1 会按 ANSI 读取中文而报解析错误。
 #>
 $ErrorActionPreference = 'Stop'
 
