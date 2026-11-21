@@ -330,6 +330,7 @@ namespace DesktopPet
             MouseMove += OnMove;
             // P0-1：右键改走轮盘菜单（12 格环）；万一轮盘构建失败自动退回列表菜单
             MouseRightButtonDown += OnRadialDown;
+            MouseWheel += OnRadialWheel;
             MouseRightButtonUp += OnRadialUp;
             KeyDown += delegate(object s, KeyEventArgs e)
             {
@@ -651,16 +652,20 @@ namespace DesktopPet
             public Brush[] Hot = new Brush[StyleCount];    // 每套样式一份悬停填充
         }
 
-        const double RadialSize = 266;
-        const double RadialOuter = 122;
-        const double RadialInner = 74;
+        // 画布比环大一圈：第 6 套「星环」要在环外铺星云（环外半径 122，星云到 176）
+        const double RadialSize = 360;
+        const double RadialOuter = 134;
+        const double RadialInner = 70;
         const int RadialCount = 12;
-        const int StyleCount = 5;            // 0 彩格 / 1 金色法阵 / 2 星空 / 3 霓虹 / 4 星云
+        const int StyleCount = 6;            // 0 彩格 / 1 金色法阵 / 2 星空 / 3 霓虹 / 4 星云 / 5 星体轨道
         const int HitChip = -2;              // 右下角"样式"按钮的命中码
         const double ChipOffX = 112;         // 相对圆心的偏移（DIP）
         const double ChipOffY = 112;
+        // 「星体轨道」模式下轨道下方很挤，把「样式」按钮挪到右上角空区
+        double ChipHitX() { return _radialStyle == 5 ? 116.0 : ChipOffX; }
+        double ChipHitY() { return _radialStyle == 5 ? -134.0 : ChipOffY; }
 
-        int _radialStyle = 1;                // 默认走金色法阵
+        int _radialStyle = 5;                // 默认走新的「星体轨道」菜单（旧皮肤作为遗留保留）
         List<UIElement>[] _decos = new List<UIElement>[StyleCount];
         System.Windows.Shapes.Ellipse _radialRing;
         System.Windows.Shapes.Path _radialBase;
@@ -670,7 +675,7 @@ namespace DesktopPet
         Brush[] _textHot = new Brush[StyleCount];
         Brush[] _baseFill = new Brush[StyleCount];
         Brush[] _chipBorder = new Brush[StyleCount];
-        static readonly string[] StyleNames = new string[] { "彩格", "法阵", "星空", "霓虹", "星云" };
+        static readonly string[] StyleNames = new string[] { "彩格", "法阵", "星空", "霓虹", "星云", "星体" };
 
         RotateTransform _nebulaSpin;         // 星云环的缓慢自转
         int _underIndex = -1;                // 环带装饰插到扇区之下、文字之上的位置（否则会盖住文字）
@@ -753,6 +758,8 @@ namespace DesktopPet
             _textHot[3] = Brushes.White;
             _textNorm[4] = new SolidColorBrush(Color.FromArgb(0xFF, 0xE8, 0xEE, 0xFF));
             _textHot[4] = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFA, 0xDC));
+            _textNorm[5] = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xF3, 0xDC));
+            _textHot[5] = Brushes.White;
             _baseFill[0] = new SolidColorBrush(Color.FromArgb(0x8C, 0x33, 0x3B, 0x46));
             _baseFill[1] = new SolidColorBrush(Color.FromArgb(0xF8, 0x11, 0x0E, 0x07));
             var cosmicBg = new LinearGradientBrush(
@@ -762,11 +769,15 @@ namespace DesktopPet
             var nebulaBg = new LinearGradientBrush(
                 Color.FromArgb(0xF2, 0x0A, 0x10, 0x30), Color.FromArgb(0xF2, 0x2A, 0x0F, 0x3A), new Point(0, 0), new Point(1, 1));
             _baseFill[4] = nebulaBg;
+            // 星环：垫底色用深海军蓝，环缝半透明，星点能透过来
+            // 星环：底盘交给程序化星图贴图，这里保持透明
+            _baseFill[5] = Brushes.Transparent;
             _chipBorder[0] = new SolidColorBrush(Color.FromArgb(0x90, 0xFF, 0xFF, 0xFF));
             _chipBorder[1] = new SolidColorBrush(Color.FromArgb(0xC0, 0xFF, 0xCE, 0x7A));
             _chipBorder[2] = new SolidColorBrush(Color.FromArgb(0xC0, 0x9F, 0xD8, 0xFF));
             _chipBorder[3] = new SolidColorBrush(Color.FromArgb(0xC0, 0xFF, 0x58, 0xC8));
             _chipBorder[4] = new SolidColorBrush(Color.FromArgb(0xC0, 0xA9, 0xC4, 0xFF));
+            _chipBorder[5] = new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xD9, 0x96));
 
             _radialCanvas = new Canvas { Width = RadialSize, Height = RadialSize, IsHitTestVisible = false, Background = Brushes.Transparent };
             double cx = RadialSize / 2.0, cy = RadialSize / 2.0;
@@ -820,6 +831,7 @@ namespace DesktopPet
             BuildCosmicDeco(cx, cy);
             BuildNeonDeco(cx, cy);
             BuildNebulaDeco(cx, cy);
+            BuildOrbitDeco(cx, cy);
             ApplyRadialStyle();
 
             _radial = new System.Windows.Controls.Primitives.Popup
@@ -880,6 +892,9 @@ namespace DesktopPet
             // 星云：扇区常态全透明，只让 Ellipse 渐变环露出来；悬停浮一层淡金
             norm[4] = new SolidColorBrush(Color.FromArgb(0x00, 0xFF, 0xF0, 0xC8));
             hot[4] = new SolidColorBrush(Color.FromArgb(0x5E, 0xFF, 0xF0, 0xC8));
+            // 星环：扇区常态全透明（露出金色环带），悬停/流光是一层暖金色光
+            norm[5] = new SolidColorBrush(Color.FromArgb(0x00, 0xFF, 0xE0, 0xA8));
+            hot[5] = new SolidColorBrush(Color.FromArgb(0x4A, 0xFF, 0xF4, 0xDC));
 
             var shape = new System.Windows.Shapes.Path
             {
@@ -1255,6 +1270,420 @@ namespace DesktopPet
             return cols[cols.Length - 1];
         }
 
+        // ================= 样式 5「星体轨道」=================
+        // 菜单不再是环形扇区：12 颗半透明星体沿着一条倾斜的椭圆轨道绕着豆仔转。
+        //   · 鼠标滚轮 / 左右拖动  →  轨道转动，选中那颗转到正前方（最大最亮）
+        //   · 转到球背面的星体会被豆仔挡住  →  立体纵深
+        //   · 界面上不写文字，选中项的名字由豆仔用说话气泡念出来
+        //   · 右键拖完松手 / 左键单击  →  执行当前选中项
+        // 星体照着参考图做：冰蓝通透、左上高光、边缘亮弧、右下反光、底下一点软影。
+
+        const int OrbSlots = RadialCount;
+        const double OrbRx = 150.0;              // 轨道长半径（DIP）
+        const double OrbRy = 52.0;               // 轨道短半径（越小越"扁"、越贴脸）
+        const double OrbTilt = -0.14;            // 轨道整体旋转（弧度）
+        const double OrbOffY = 44.0;             // 轨道中心整体下移：后半圈正好从豆仔眼睛后面穿过
+        const double OrbStepDeg = 360.0 / OrbSlots;
+        const double BallOffY = -15.0;           // 豆仔球心在窗口中心上方 15 DIP
+        const double BallVisR = 78.0;            // 豆仔球体视觉半径
+
+        List<Canvas> _orbBodies = new List<Canvas>();
+        List<ScaleTransform> _orbScale = new List<ScaleTransform>();
+        List<System.Windows.Shapes.Ellipse> _orbSelGlow = new List<System.Windows.Shapes.Ellipse>();
+        List<System.Windows.Shapes.Ellipse> _orbStateDot = new List<System.Windows.Shapes.Ellipse>();
+        List<System.Windows.Shapes.Ellipse> _orbSelRing = new List<System.Windows.Shapes.Ellipse>();
+        List<System.Windows.Shapes.Ellipse> _orbBodyEls = new List<System.Windows.Shapes.Ellipse>();
+        List<System.Windows.Shapes.Ellipse> _orbRimEls = new List<System.Windows.Shapes.Ellipse>();
+        List<Brush> _orbBrNorm = new List<Brush>();
+        List<Brush> _orbBrOn = new List<Brush>();
+        List<double> _orbPhase = new List<double>();
+        List<double> _orbSizeVar = new List<double>();
+        readonly List<UIElement> _orbSparkles = new List<UIElement>();
+        readonly List<double> _orbSparkleBase = new List<double>();
+        System.Windows.Shapes.Path _orbPathLine;
+        double _orbAngle;                        // 当前旋转角（度）
+        double _orbTarget;                       // 目标旋转角（度）
+        int _orbIndex;                           // 当前选中项
+        double _orbDragSlots;                    // 拖动累计（slot）
+        int _orbDragStart = -1;                  // 拖动起始选中项
+        string _orbSpoken;                       // 上次念过的名字（避免重复）
+
+        static Color Col(byte a, int rgb)
+        {
+            return Color.FromArgb(a, (byte)((rgb >> 16) & 0xFF), (byte)((rgb >> 8) & 0xFF), (byte)(rgb & 0xFF));
+        }
+
+        // 轨道上的点：先画一个压扁的椭圆，再整体旋转出倾角
+        static void OrbPos(double phi, out double x, out double y)
+        {
+            double ex = OrbRx * Math.Cos(phi);
+            double ey = OrbRy * Math.Sin(phi);
+            double c = Math.Cos(OrbTilt), s = Math.Sin(OrbTilt);
+            x = ex * c - ey * s;
+            y = ex * s + ey * c + OrbOffY;
+        }
+
+        static int OrbNorm(int i)
+        {
+            i %= OrbSlots;
+            if (i < 0) i += OrbSlots;
+            return i;
+        }
+
+        // 星体表面：冰蓝（常态）/ 暖金（已开启）
+        static RadialGradientBrush BubbleBrush(bool warm)
+        {
+            var br = new RadialGradientBrush { Center = new Point(0.34, 0.28), GradientOrigin = new Point(0.34, 0.28) };
+            if (warm)
+            {
+                br.GradientStops.Add(new GradientStop(Col(0xFF, 0xFFFDF4), 0.0));
+                br.GradientStops.Add(new GradientStop(Col(0xF4, 0xFFEBB2), 0.24));
+                br.GradientStops.Add(new GradientStop(Col(0xE4, 0xFFCB62), 0.60));
+                br.GradientStops.Add(new GradientStop(Col(0xF4, 0xBE7412), 1.0));
+            }
+            else
+            {
+                br.GradientStops.Add(new GradientStop(Col(0xFA, 0xF8FDFF), 0.0));
+                br.GradientStops.Add(new GradientStop(Col(0xF2, 0xD2F2FF), 0.24));
+                br.GradientStops.Add(new GradientStop(Col(0xE0, 0x82C6EA), 0.60));
+                br.GradientStops.Add(new GradientStop(Col(0xF0, 0x2C6CA6), 1.0));
+            }
+            br.Freeze();
+            return br;
+        }
+
+        static System.Windows.Shapes.Path MakeSparkleEl(double x, double y, double size, Color col)
+        {
+            var fig = new PathFigure { IsClosed = true, IsFilled = true };
+            for (int k = 0; k < 8; k++)
+            {
+                double ang = (-90.0 + k * 45.0) * Math.PI / 180.0;
+                double rr = (k % 2 == 0) ? size : size * 0.16;
+                var pt = new Point(x + rr * Math.Cos(ang), y + rr * Math.Sin(ang));
+                if (k == 0) fig.StartPoint = pt;
+                else fig.Segments.Add(new LineSegment { Point = pt });
+            }
+            var geo = new PathGeometry();
+            geo.Figures.Add(fig);
+            return new System.Windows.Shapes.Path
+            {
+                Data = geo,
+                Fill = new SolidColorBrush(col),
+                IsHitTestVisible = false
+            };
+        }
+
+        // 把轨道线按"前半圈 / 后半圈"分开画，后半圈明显更淡（绕到豆仔背后）
+        bool OrbitBehindPet(double x, double y, double margin)
+        {
+            double dx = x, dy = y - BallOffY;
+            return Math.Sqrt(dx * dx + dy * dy) < BallVisR + margin;
+        }
+
+        // 轨道线：后半圈在豆仔轮廓内断开（被豆仔挡住），前半圈整段画
+        void AddOrbitArc(double cx, double cy, bool front, double thick, byte a, int rgb)
+        {
+            var geo = new PathGeometry();
+            PathFigure fig = null;
+            int n = 72;
+            for (int k = 0; k <= n; k++)
+            {
+                double phi = (front ? 0.0 : Math.PI) + Math.PI * k / n;
+                double x, y;
+                OrbPos(phi, out x, out y);
+                bool hidden = !front && OrbitBehindPet(x, y, 2.0);
+                if (hidden) { fig = null; continue; }
+                var pt = new Point(cx + x, cy + y);
+                if (fig == null)
+                {
+                    fig = new PathFigure { IsClosed = false, StartPoint = pt };
+                    geo.Figures.Add(fig);
+                }
+                else fig.Segments.Add(new LineSegment { Point = pt });
+            }
+            if (geo.Figures.Count == 0) return;
+            var el = new System.Windows.Shapes.Path
+            {
+                Data = geo,
+                Stroke = new SolidColorBrush(Col(a, rgb)),
+                StrokeThickness = thick,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                Fill = null,
+                IsHitTestVisible = false
+            };
+            AddDecoUnder(5, el);
+        }
+
+        void BuildOrbitDeco(double cx, double cy)
+        {
+            // 轨道：后半圈很淡（只在豆仔头后若隐若现），前半圈亮一些
+            AddOrbitArc(cx, cy, false, 5.0, 0x10, 0x2E6FA8);
+            AddOrbitArc(cx, cy, false, 1.2, 0x34, 0xBEE8FF);
+            AddOrbitArc(cx, cy, true, 8.0, 0x22, 0x2E6FA8);
+            var geoFront = new PathGeometry();
+            var figFront = new PathFigure { IsClosed = false };
+            for (int k = 0; k <= 72; k++)
+            {
+                double phi = Math.PI * k / 72.0;
+                double x, y;
+                OrbPos(phi, out x, out y);
+                var pt = new Point(cx + x, cy + y);
+                if (k == 0) figFront.StartPoint = pt;
+                else figFront.Segments.Add(new LineSegment { Point = pt });
+            }
+            geoFront.Figures.Add(figFront);
+            _orbPathLine = new System.Windows.Shapes.Path
+            {
+                Data = geoFront,
+                Stroke = new SolidColorBrush(Col(0xDE, 0xF2FDFF)),
+                StrokeThickness = 1.4,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                Fill = null,
+                IsHitTestVisible = false
+            };
+            AddDecoUnder(5, _orbPathLine);
+
+            // 12 颗星体
+            for (int i = 0; i < OrbSlots; i++)
+            {
+                var root = new Canvas { Width = 64, Height = 64, IsHitTestVisible = false };
+
+                // 底影
+                var sh = new System.Windows.Shapes.Ellipse { Width = 32, Height = 11 };
+                var shBr = new RadialGradientBrush();
+                shBr.GradientStops.Add(new GradientStop(Col(0x66, 0x08213C), 0.0));
+                shBr.GradientStops.Add(new GradientStop(Col(0x00, 0x08213C), 1.0));
+                shBr.Freeze();
+                sh.Fill = shBr;
+                Canvas.SetLeft(sh, 16);
+                Canvas.SetTop(sh, 42);
+                root.Children.Add(sh);
+
+                // 泡体：左上亮、边缘深的冰蓝球
+                // 外圈暗边（让气泡在白底上也有轮廓）
+                var halo = new System.Windows.Shapes.Ellipse { Width = 47, Height = 47, Fill = null, Stroke = new SolidColorBrush(Col(0x30, 0x1E4E7A)), StrokeThickness = 2.4 };
+                Canvas.SetLeft(halo, 8.5);
+                Canvas.SetTop(halo, 6.5);
+                root.Children.Add(halo);
+
+                var body = new System.Windows.Shapes.Ellipse { Width = 42, Height = 42 };
+                var brN = BubbleBrush(false);
+                var brOn = BubbleBrush(true);
+                body.Fill = brN;
+                Canvas.SetLeft(body, 11);
+                Canvas.SetTop(body, 9);
+                root.Children.Add(body);
+
+                // 边缘亮弧
+                var rim = new System.Windows.Shapes.Ellipse
+                {
+                    Width = 42, Height = 42, Fill = null,
+                    Stroke = new SolidColorBrush(Col(0xC8, 0xF2FDFF)), StrokeThickness = 1.3
+                };
+                Canvas.SetLeft(rim, 11);
+                Canvas.SetTop(rim, 9);
+                root.Children.Add(rim);
+
+                // 左上高光
+                var hi = new System.Windows.Shapes.Ellipse { Width = 13, Height = 8, Fill = new SolidColorBrush(Col(0xF0, 0xFFFFFF)) };
+                hi.RenderTransform = new RotateTransform(-26);
+                hi.RenderTransformOrigin = new Point(0.5, 0.5);
+                Canvas.SetLeft(hi, 18);
+                Canvas.SetTop(hi, 16);
+                root.Children.Add(hi);
+
+                // 右下反光（透光感）
+                var ca = new System.Windows.Shapes.Ellipse { Width = 15, Height = 8, Opacity = 0.55 };
+                var caBr = new RadialGradientBrush();
+                caBr.GradientStops.Add(new GradientStop(Col(0xAA, 0xE8FEFF), 0.0));
+                caBr.GradientStops.Add(new GradientStop(Col(0x00, 0xE8FEFF), 1.0));
+                caBr.Freeze();
+                ca.Fill = caBr;
+                ca.RenderTransform = new RotateTransform(24);
+                ca.RenderTransformOrigin = new Point(0.5, 0.5);
+                Canvas.SetLeft(ca, 26);
+                Canvas.SetTop(ca, 38);
+                root.Children.Add(ca);
+
+                // 选中光环
+                var gl = new System.Windows.Shapes.Ellipse { Width = 72, Height = 72, Opacity = 0.0 };
+                var glBr = new RadialGradientBrush();
+                glBr.GradientStops.Add(new GradientStop(Col(0x00, 0xBFEAFF), 0.50));
+                glBr.GradientStops.Add(new GradientStop(Col(0x34, 0xBFEAFF), 0.78));
+                glBr.GradientStops.Add(new GradientStop(Col(0x00, 0xEAFBFF), 1.0));
+                glBr.Freeze();
+                gl.Fill = glBr;
+                Canvas.SetLeft(gl, -4);
+                Canvas.SetTop(gl, -4);
+                root.Children.Add(gl);
+
+                // 选中环：选中那颗才亮
+                var ring = new System.Windows.Shapes.Ellipse
+                {
+                    Width = 50, Height = 50, Fill = null, Opacity = 0.0,
+                    Stroke = new SolidColorBrush(Col(0xE8, 0xF4FDFF)), StrokeThickness = 1.8
+                };
+                Canvas.SetLeft(ring, 7);
+                Canvas.SetTop(ring, 5);
+                root.Children.Add(ring);
+
+                // 开关状态点
+                var dot = new System.Windows.Shapes.Ellipse
+                {
+                    Width = 5, Height = 5,
+                    Fill = new SolidColorBrush(Col(0xFF, 0xFFE9A8)),
+                    Visibility = Visibility.Collapsed
+                };
+                Canvas.SetLeft(dot, 44);
+                Canvas.SetTop(dot, 36);
+                root.Children.Add(dot);
+
+                var st = new ScaleTransform(1, 1);
+                root.RenderTransform = st;
+                root.RenderTransformOrigin = new Point(0.5, 0.5);
+                AddDecoUnder(5, root);
+                _orbBodies.Add(root);
+                _orbScale.Add(st);
+                _orbSelGlow.Add(gl);
+                _orbSelRing.Add(ring);
+                _orbBodyEls.Add(body);
+                _orbRimEls.Add(rim);
+                _orbBrNorm.Add(brN);
+                _orbBrOn.Add(brOn);
+                _orbStateDot.Add(dot);
+                _orbPhase.Add(i * 0.63);
+                _orbSizeVar.Add(0.90 + 0.16 * Math.Abs(Math.Sin(i * 2.7 + 0.4)));   // 大小不一，像图里那样
+            }
+
+            // 轨道外几颗小星芒
+            var rnd = new Random(520);
+            for (int i = 0; i < 12; i++)
+            {
+                double a = rnd.NextDouble() * Math.PI * 2.0;
+                double rr = 150.0 + rnd.NextDouble() * 25.0;
+                var sp = MakeSparkleEl(cx + rr * Math.Cos(a), cy + rr * Math.Sin(a) * 0.92,
+                                       2.6 + rnd.NextDouble() * 3.2, Col(0xCC, 0xE8F8FF));
+                AddDecoUnder(5, sp);
+                _orbSparkles.Add(sp);
+                _orbSparkleBase.Add(0.25 + rnd.NextDouble() * 0.6);
+            }
+        }
+
+        // 每帧：轨道缓动、星体定位/缩放/遮挡、星芒呼吸
+        void OrbitTick(bool near)
+        {
+            // 角度差折到 (-180, 180]，永远走最短路径
+            double dd = _orbTarget - _orbAngle;
+            dd -= 360.0 * Math.Floor((dd + 180.0) / 360.0);
+            if (Math.Abs(dd) > 0.05) _orbAngle += dd * (near ? 0.30 : 0.24);
+            else _orbAngle += dd;
+            if (_orbAngle > 720.0) { _orbAngle -= 720.0; _orbTarget -= 720.0; }
+            else if (_orbAngle < -720.0) { _orbAngle += 720.0; _orbTarget += 720.0; }
+
+            double cx = RadialSize / 2.0, cy = RadialSize / 2.0;
+            for (int i = 0; i < _orbBodies.Count; i++)
+            {
+                double phi = (90.0 + i * OrbStepDeg + _orbAngle) * Math.PI / 180.0;
+                double x, y;
+                OrbPos(phi, out x, out y);
+                double depth = Math.Sin(phi);                       // 1 = 正前方，-1 = 正后方
+                double f = (depth + 1.0) * 0.5;
+                double bob = Math.Sin(_flowPhase * 1.25 + _orbPhase[i]) * 2.2 * f;
+                bool sel = (i == _orbIndex);
+                double scl = (0.34 + 0.88 * Math.Pow(f, 0.90)) * _orbSizeVar[i] * (sel ? 1.34 : 1.0);
+                _orbScale[i].ScaleX = scl;
+                _orbScale[i].ScaleY = scl;
+
+                var root = _orbBodies[i];
+                Canvas.SetLeft(root, cx + x - 32.0);
+                Canvas.SetTop(root, cy + y + bob - 32.0 - (sel ? 5.0 : 0.0));
+
+                // 转到球背面 → 被豆仔挡住（留出星体自身半径，避免压在球边上）
+                double bdx = x, bdy = y + bob - BallOffY;
+                double bodyR = 21.0 * scl;
+                bool behind = depth < 0.02 && Math.Sqrt(bdx * bdx + bdy * bdy) < BallVisR + bodyR * 0.95;
+                root.Opacity = behind ? 0.0 : (0.04 + 0.96 * Math.Pow(f, 1.15));
+                Panel.SetZIndex(root, 200 + (int)(depth * 100.0));
+                _orbSelGlow[i].Opacity = sel && !behind ? (0.82 + 0.18 * Math.Sin(_flowPhase * 2.2)) : 0.0;
+                _orbSelRing[i].Opacity = sel && !behind ? (0.55 + 0.35 * Math.Sin(_flowPhase * 2.2)) : 0.0;
+            }
+            for (int i = 0; i < _orbSparkles.Count; i++)
+                _orbSparkles[i].Opacity = _orbSparkleBase[i] * (0.35 + 0.65 * (0.5 + 0.5 * Math.Sin(_flowPhase * 1.6 + i * 1.3)));
+            if (_orbPathLine != null) _orbPathLine.Opacity = 0.55 + 0.25 * Math.Sin(_flowPhase * 1.1);
+        }
+
+        void OrbReset()
+        {
+            _orbIndex = OrbNorm(_orbIndex);
+            _orbDragSlots = 0;
+            _orbDragStart = -1;
+            _orbTarget = -_orbIndex * OrbStepDeg;
+            _orbAngle = _orbTarget;
+            _orbSpoken = null;
+            SpeakOrb();
+        }
+
+        // 让豆仔用说话气泡念出当前选中项
+        void SpeakOrb()
+        {
+            if (_radialItems == null || _orbIndex < 0 || _orbIndex >= _radialItems.Count) return;
+            var it = _radialItems[_orbIndex];
+            string name = it.DynLabel != null ? it.DynLabel() : it.Label;
+            if (name == _orbSpoken) return;
+            _orbSpoken = name;
+            try { ShowBubble(name); } catch { }
+        }
+
+        void OrbitRotate(int dir)
+        {
+            _orbIndex = OrbNorm(_orbIndex + dir);
+            _orbTarget = -_orbIndex * OrbStepDeg;
+            Log.Write("orbit rotate -> " + _orbIndex + " " + _radialItems[_orbIndex].Label);
+            SpeakOrb();
+        }
+
+        // 左右拖动：轨道跟手转，选中项实时切换
+        void OrbitDragTick(Point p)
+        {
+            if (_orbDragStart < 0) _orbDragStart = _orbIndex;
+            _orbDragSlots = (p.X - _radialDownScreen.X) / 62.0;
+            int ni = OrbNorm(_orbDragStart + (int)Math.Round(_orbDragSlots));
+            if (ni != _orbIndex) { _orbIndex = ni; SpeakOrb(); }
+            _orbTarget = -(_orbDragStart + _orbDragSlots) * OrbStepDeg;
+        }
+
+        // 松手：吸附到最近一格；确实拖动过就直接执行
+        void OrbitRelease()
+        {
+            int start = _orbDragStart < 0 ? _orbIndex : _orbDragStart;
+            bool dragged = Math.Abs(_orbDragSlots) > 0.18;
+            _orbIndex = OrbNorm(start + (int)Math.Round(_orbDragSlots));
+            _orbDragSlots = 0;
+            _orbDragStart = -1;
+            _orbTarget = -_orbIndex * OrbStepDeg;
+            if (dragged) RunRadialItem();
+            else SpeakOrb();
+        }
+
+        // 已开启的开关项：星体换成暖金色
+        void OrbSyncStateDots()
+        {
+            if (_radialItems == null) return;
+            for (int i = 0; i < _orbStateDot.Count && i < _radialItems.Count; i++)
+            {
+                var it = _radialItems[i];
+                bool on = (it.IsOn != null && it.IsOn());
+                _orbStateDot[i].Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+                if (i < _orbBodyEls.Count)
+                {
+                    _orbBodyEls[i].Fill = on ? _orbBrOn[i] : _orbBrNorm[i];
+                    _orbRimEls[i].Stroke = new SolidColorBrush(on ? Col(0xE8, 0xFFF6C8) : Col(0xC8, 0xF2FDFF));
+                }
+            }
+        }
+
         void ApplyRadialStyle()
         {
             if (_radialBase != null) _radialBase.Fill = _baseFill[_radialStyle];
@@ -1269,16 +1698,30 @@ namespace DesktopPet
             }
             if (_radialChip != null)
             {
+                double cxc = RadialSize / 2.0, cyc = RadialSize / 2.0;
+                Canvas.SetLeft(_radialChip, cxc + ChipHitX() - 21);
+                Canvas.SetTop(_radialChip, cyc + ChipHitY() - 10);
                 _radialChip.BorderBrush = _chipBorder[_radialStyle];
                 _radialChipText.Foreground = _textNorm[_radialStyle];
                 _radialChip.Background = _radialStyle == 0
                     ? new SolidColorBrush(Color.FromArgb(0xB4, 0x1A, 0x18, 0x14))
-                    : new SolidColorBrush(Color.FromArgb(0xC8, 0x12, 0x10, 0x14));
+                    : (_radialStyle == 5
+                        ? new SolidColorBrush(Color.FromArgb(0xD2, 0x14, 0x1C, 0x46))
+                        : new SolidColorBrush(Color.FromArgb(0xC8, 0x12, 0x10, 0x14)));
             }
             if (_radialItems != null)
             {
                 var tickBrush = _textNorm[_radialStyle];
-                for (int i = 0; i < _radialItems.Count; i++) _radialItems[i].Tick.Foreground = tickBrush;
+                bool orbit = (_radialStyle == 5);
+                for (int i = 0; i < _radialItems.Count; i++)
+                {
+                    var it = _radialItems[i];
+                    it.Tick.Foreground = tickBrush;
+                    it.Text.Visibility = orbit ? Visibility.Collapsed : Visibility.Visible;
+                    it.Shape.Visibility = orbit ? Visibility.Collapsed : Visibility.Visible;
+                    if (orbit) it.Tick.Visibility = Visibility.Hidden;
+                    else if (it.IsOn != null) it.Tick.Visibility = it.IsOn() ? Visibility.Visible : Visibility.Hidden;
+                }
             }
             ApplyRadialHover();
         }
@@ -1287,6 +1730,7 @@ namespace DesktopPet
         {
             _radialStyle = (_radialStyle + 1) % StyleCount;
             ApplyRadialStyle();
+            if (_radialStyle == 5 && _radialOpen) { OrbSyncStateDots(); OrbReset(); }
             SaveSettings();
             Log.Write("radial style=" + _radialStyle + " " + StyleNames[_radialStyle]);
         }
@@ -1324,7 +1768,7 @@ namespace DesktopPet
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
                 File.WriteAllLines(ConfigPath, new string[]
                 {
-                    "# 豆仔配置：删掉这个文件就回到默认（金色法阵）",
+                    "# 豆仔配置：删掉这个文件就回到默认（星体轨道）",
                     "style=" + _radialStyle
                 }, Encoding.UTF8);
             }
@@ -1405,6 +1849,7 @@ namespace DesktopPet
             _radialMoveMax = 0;
             _radialDownScreen = CursorDip();
             ApplyRadialHover();
+            if (_radialStyle == 5) { OrbSyncStateDots(); OrbReset(); }
             StartFlow();
             CaptureMouse();
             Log.Write("radial open at " + (int)_radialCx + "," + (int)_radialCy);
@@ -1425,7 +1870,8 @@ namespace DesktopPet
         {
             var p = CursorDip();
             double dx = p.X - _radialCx, dy = p.Y - _radialCy;
-            if (Math.Abs(dx - ChipOffX) < 23 && Math.Abs(dy - ChipOffY) < 12) return HitChip;   // 右下角"样式"按钮
+            if (Math.Abs(dx - ChipHitX()) < 23 && Math.Abs(dy - ChipHitY()) < 12) return HitChip;   // 「样式」按钮
+            if (_radialStyle == 5) return -1;                                                  // 星体轨道：不按角度取扇区
             double r = Math.Sqrt(dx * dx + dy * dy);
             if (r < RadialInner || r > RadialOuter) return -1;
             double ang = Math.Atan2(dy, dx) * 180.0 / Math.PI;      // 0 = 正右
@@ -1441,6 +1887,15 @@ namespace DesktopPet
             var p = CursorDip();
             double d = Math.Sqrt((p.X - _radialDownScreen.X) * (p.X - _radialDownScreen.X) + (p.Y - _radialDownScreen.Y) * (p.Y - _radialDownScreen.Y));
             if (d > _radialMoveMax) _radialMoveMax = d;
+            if (_radialStyle == 5)
+            {
+                // 星体轨道：只有按住鼠标拖动才转轨道（否则移动鼠标去点「样式」会误转）
+                int h0 = HitRadial();
+                if (h0 != _radialHover) { _radialHover = h0; ApplyRadialHover(); }
+                if (Mouse.LeftButton == MouseButtonState.Pressed || Mouse.RightButton == MouseButtonState.Pressed)
+                    OrbitDragTick(p);
+                return;
+            }
             int h = HitRadial();
             if (h != _radialHover) { _radialHover = h; ApplyRadialHover(); }
         }
@@ -1449,6 +1904,18 @@ namespace DesktopPet
         {
             if (_radialItems == null) return;
             int s = _radialStyle;
+            // 星体轨道：没有扇区高亮，只保留右下角「样式」按钮的悬停反馈
+            if (s == 5)
+            {
+                if (_radialChip != null)
+                {
+                    bool hot0 = (_radialHover == HitChip);
+                    _radialChip.Opacity = hot0 ? 1.0 : 0.92;
+                    _radialChip.BorderThickness = new Thickness(hot0 ? 2 : 1);
+                    _radialChipText.FontWeight = hot0 ? FontWeights.Bold : FontWeights.Normal;
+                }
+                return;
+            }
             Color strokeN, strokeH;
             if (s == 1) { strokeN = Color.FromArgb(0x14, 0xFF, 0xD0, 0x80); strokeH = Color.FromArgb(0xFF, 0xFF, 0xE2, 0xAC); }
             else if (s == 2) { strokeN = Color.FromArgb(0x22, 0x9F, 0xD8, 0xFF); strokeH = Color.FromArgb(0xFF, 0xCF, 0xEF, 0xFF); }
@@ -1521,6 +1988,7 @@ namespace DesktopPet
             bool near = Math.Abs(p.X - _radialCx) < RadialOuter + 14 && Math.Abs(p.Y - _radialCy) < RadialOuter + 14;
             _flowPhase = (_flowPhase + (near ? 0.4 : 0.2)) % RadialCount;   // 0.2 格/帧 ≈ 3.6 秒转一圈
             int s = _radialStyle;
+            if (s == 5) { OrbitTick(near); return; }          // 星环：星尘绕环 + 星芒呼吸，扇区不参与流光
             if (s == 4 && _nebulaSpin != null)
                 _nebulaSpin.Angle = (_nebulaSpin.Angle + (near ? 1.0 : 0.5)) % 360;   // 星云慢转：约 43 秒一圈，悬停快一倍
             for (int i = 0; i < _radialItems.Count; i++)
@@ -1547,7 +2015,7 @@ namespace DesktopPet
 
         void RunRadialItem()
         {
-            int h = _radialHover;
+            int h = (_radialStyle == 5) ? _orbIndex : _radialHover;
             CloseRadial();
             if (h < 0 || _radialItems == null || h >= _radialItems.Count) return;
             try
@@ -1579,9 +2047,18 @@ namespace DesktopPet
             if (!_radialOpen) return;
             UpdateRadialHover();
             if (_radialHover == HitChip) { ToggleRadialStyle(); e.Handled = true; return; }
+            if (_radialStyle == 5) { OrbitRelease(); e.Handled = true; return; }
             if (_radialHover >= 0 && _radialMoveMax > 10) RunRadialItem();
             else if (_radialMoveMax <= 10) { /* 只点了一下：保持展开，等左键点选 */ }
             else CloseRadial();
+            e.Handled = true;
+        }
+
+        // 星体轨道：滚轮左右转菜单
+        void OnRadialWheel(object sender, MouseWheelEventArgs e)
+        {
+            if (!_radialOpen || _radialStyle != 5) return;
+            OrbitRotate(e.Delta > 0 ? -1 : 1);
             e.Handled = true;
         }
 
@@ -3148,6 +3625,13 @@ namespace DesktopPet
             {
                 UpdateRadialHover();
                 if (_radialHover == HitChip) ToggleRadialStyle();
+                else if (_radialStyle == 5)
+                {
+                    var cp = CursorDip();
+                    double ox = cp.X - _radialCx, oy = cp.Y - _radialCy;
+                    if (Math.Sqrt(ox * ox + oy * oy) > RadialOuter + 30) CloseRadial();
+                    else RunRadialItem();
+                }
                 else if (_radialHover >= 0) RunRadialItem();
                 else CloseRadial();
                 e.Handled = true;
