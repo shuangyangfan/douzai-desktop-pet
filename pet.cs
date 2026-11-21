@@ -1315,6 +1315,11 @@ namespace DesktopPet
             return Color.FromArgb(a, (byte)((rgb >> 16) & 0xFF), (byte)((rgb >> 8) & 0xFF), (byte)(rgb & 0xFF));
         }
 
+        static Color Col(byte a, byte r, byte g, byte b)
+        {
+            return Color.FromArgb(a, r, g, b);
+        }
+
         // 轨道上的点：先画一个压扁的椭圆，再整体旋转出倾角
         static void OrbPos(double phi, out double x, out double y)
         {
@@ -2346,9 +2351,10 @@ namespace DesktopPet
 
         // ================= AI 聊天（OpenAI 兼容接口）=================
         // 右键菜单「说话」→ 打开聊天窗：消息发到配置的模型接口，回复显示在窗口里，
-        // 同时让豆仔用说话气泡念出前 60 个字。接口地址 / Key / 模型 / 人设都在
+        // 同时让豆仔用说话气泡念出前 60 个字。界面走深空 + 水彩风：圆角气泡、头像、
+        // 胶囊按钮、输入框聚焦高亮、思考中提示。接口地址 / Key / 模型 / 人设都在
         // 「设置」面板里填，存在 %APPDATA%\DouzaiDesktopPet\config.ini（本机明文）。
-        // 没配置接口时会自动退回原来的「让豆仔说话」模式，功能不会坏。
+        // 没配置接口时自动退回原来的「让豆仔说话」模式，功能不会坏。
 
         const string DefaultAiPrompt = "你是桌面宠物「豆仔」，一只圆滚滚的蓝色小球。说话简短、可爱、口语化，多用语气词；回答控制在 80 字以内，不要用 Markdown。";
         string _aiUrl = "", _aiKey = "", _aiModel = "", _aiPrompt = "";
@@ -2356,8 +2362,12 @@ namespace DesktopPet
         StackPanel _chatList;
         ScrollViewer _chatScroll;
         TextBox _chatInput;
-        Button _chatSend;
+        Border _chatInputWrap;
+        Border _chatSend;
         TextBlock _chatHint;
+        TextBlock _chatPlaceholder;
+        System.Windows.Shapes.Ellipse _chatDot;
+        Border _chatThinking;
         bool _chatBusy;
         readonly List<string[]> _chatHistory = new List<string[]>();
 
@@ -2521,37 +2531,217 @@ namespace DesktopPet
             return content;
         }
 
+        // ---------------- 聊天窗的小部件 ----------------
+        static Brush ChatGrad(int a1, int c1, int a2, int c2)
+        {
+            var br = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(1, 1) };
+            br.GradientStops.Add(new GradientStop(WithAlpha(Col(0xFF, c1), (byte)a1), 0.0));
+            br.GradientStops.Add(new GradientStop(WithAlpha(Col(0xFF, c2), (byte)a2), 1.0));
+            br.Freeze();
+            return br;
+        }
+
+        static FrameworkElement MakePetAvatar(double size)
+        {
+            var host = new Grid { Width = size, Height = size, Margin = new Thickness(0, 3, 8, 0), VerticalAlignment = VerticalAlignment.Top };
+            var sp = new System.Windows.Shapes.Ellipse { Width = size, Height = size };
+            var br = new RadialGradientBrush { Center = new Point(0.36, 0.30), GradientOrigin = new Point(0.36, 0.30) };
+            br.GradientStops.Add(new GradientStop(Col(0xFF, 0xEAF6FF), 0.0));
+            br.GradientStops.Add(new GradientStop(Col(0xEE, 0x8FCBEA), 0.55));
+            br.GradientStops.Add(new GradientStop(Col(0xF0, 0x2E5F92), 1.0));
+            br.Freeze();
+            sp.Fill = br;
+            host.Children.Add(sp);
+            var hi = new System.Windows.Shapes.Ellipse
+            {
+                Width = size * 0.34, Height = size * 0.22,
+                Fill = new SolidColorBrush(Col(0xAA, 0xFFFFFF)),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(size * 0.17, size * 0.17, 0, 0)
+            };
+            host.Children.Add(hi);
+            return host;
+        }
+
+        static FrameworkElement MakeUserAvatar(double size)
+        {
+            var host = new Grid { Width = size, Height = size, Margin = new Thickness(8, 3, 0, 0), VerticalAlignment = VerticalAlignment.Top };
+            var sp = new System.Windows.Shapes.Ellipse { Width = size, Height = size };
+            var br = new RadialGradientBrush { Center = new Point(0.34, 0.28), GradientOrigin = new Point(0.34, 0.28) };
+            br.GradientStops.Add(new GradientStop(Col(0xFF, 0xF2ECFF), 0.0));
+            br.GradientStops.Add(new GradientStop(Col(0xEE, 0xB49CF0), 0.55));
+            br.GradientStops.Add(new GradientStop(Col(0xF0, 0x6A4BC4), 1.0));
+            br.Freeze();
+            sp.Fill = br;
+            host.Children.Add(sp);
+            var tb = new TextBlock
+            {
+                Text = "我", FontSize = size * 0.44, Foreground = Brushes.White,
+                FontWeight = FontWeights.Bold,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            host.Children.Add(tb);
+            return host;
+        }
+
+        Border MakePillButton(string text, Action onClick, bool accent)
+        {
+            var tb = new TextBlock
+            {
+                Text = text,
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = accent ? Brushes.White : new SolidColorBrush(Col(0xE8, 0xD6, 0xE0, 0xFF)),
+                FontFamily = new FontFamily("Microsoft YaHei UI")
+            };
+            var border = new Border
+            {
+                Background = accent
+                    ? ChatGrad(0xFF, 0x5B8DEF, 0xFF, 0x8A6BFF)
+                    : new SolidColorBrush(Col(0x33, 0xC8, 0xD6, 0xFF)),
+                BorderBrush = accent ? Brushes.Transparent : new SolidColorBrush(Col(0x2A, 0xD6, 0xE4, 0xFF)),
+                BorderThickness = new Thickness(accent ? 0 : 1),
+                CornerRadius = new CornerRadius(13),
+                Padding = new Thickness(13, 5, 13, 5),
+                Child = tb,
+                Cursor = Cursors.Hand,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            border.MouseLeftButtonUp += delegate
+            {
+                try { onClick(); }
+                catch (Exception ex) { Log.Write("chat btn: " + ex.Message); }
+            };
+            border.MouseEnter += delegate { border.Opacity = 0.82; };
+            border.MouseLeave += delegate { border.Opacity = 1.0; };
+            return border;
+        }
+
+        static System.Windows.Media.Effects.DropShadowEffect ChatShadow(byte alpha, Color color)
+        {
+            return new System.Windows.Media.Effects.DropShadowEffect
+            {
+                BlurRadius = 10,
+                ShadowDepth = 2,
+                Direction = 270,
+                Opacity = alpha / 255.0,
+                Color = color,
+                RenderingBias = System.Windows.Media.Effects.RenderingBias.Performance
+            };
+        }
+
         void AddChatBubble(string text, bool fromUser, bool system)
         {
             if (_chatList == null) return;
+            var font = new FontFamily("Microsoft YaHei UI");
+            if (system)
+            {
+                var st = new TextBlock
+                {
+                    Text = text,
+                    FontSize = 11.5,
+                    FontFamily = font,
+                    Foreground = new SolidColorBrush(Col(0xFF, 0x8E, 0x9C, 0xBC)),
+                    TextWrapping = TextWrapping.Wrap,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    TextAlignment = TextAlignment.Center,
+                    Margin = new Thickness(16, 6, 16, 6)
+                };
+                _chatList.Children.Add(st);
+                try { _chatScroll.ScrollToEnd(); } catch { }
+                return;
+            }
+
             var tb = new TextBlock
             {
                 Text = text,
                 FontSize = 13,
+                FontFamily = font,
                 TextWrapping = TextWrapping.Wrap,
-                Foreground = system
-                    ? new SolidColorBrush(Color.FromArgb(0xFF, 0x9A, 0xA6, 0xC0))
-                    : (fromUser ? Brushes.White : new SolidColorBrush(Color.FromArgb(0xFF, 0x1E, 0x28, 0x38)))
+                LineHeight = 19,
+                Foreground = fromUser ? Brushes.White : new SolidColorBrush(Col(0xFF, 0x1C, 0x26, 0x38))
             };
-            var border = new Border
+            var bubble = new Border
             {
-                Background = system
-                    ? new SolidColorBrush(Color.FromArgb(0x1A, 0xFF, 0xFF, 0xFF))
-                    : (fromUser ? new SolidColorBrush(Color.FromArgb(0xFF, 0x4A, 0x7F, 0xD6))
-                                : new SolidColorBrush(Color.FromArgb(0xFF, 0xEF, 0xF4, 0xFD))),
-                CornerRadius = new CornerRadius(10),
-                Padding = new Thickness(9, 6, 9, 6),
-                Margin = new Thickness(6, 4, 6, 4),
-                HorizontalAlignment = fromUser ? HorizontalAlignment.Right : HorizontalAlignment.Left,
-                MaxWidth = 300,
-                Child = tb
+                Child = tb,
+                CornerRadius = fromUser ? new CornerRadius(14, 4, 14, 14) : new CornerRadius(4, 14, 14, 14),
+                Padding = new Thickness(11, 7, 11, 7),
+                MaxWidth = 282,
+                Background = fromUser
+                    ? ChatGrad(0xFF, 0x4E7FE0, 0xFF, 0x6F63E8)
+                    : new SolidColorBrush(Col(0xFA, 0xF4, 0xF8, 0xFF)),
+                Effect = fromUser
+                    ? ChatShadow(0x38, Col(0xFF, 0x2A, 0x3F, 0x9A))
+                    : ChatShadow(0x30, Col(0xFF, 0x0A, 0x12, 0x28))
             };
-            _chatList.Children.Add(border);
+            var row = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(6, 5, 6, 5),
+                HorizontalAlignment = fromUser ? HorizontalAlignment.Right : HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top
+            };
+            if (fromUser)
+            {
+                row.Children.Add(bubble);
+                row.Children.Add(MakeUserAvatar(26));
+            }
+            else
+            {
+                row.Children.Add(MakePetAvatar(26));
+                row.Children.Add(bubble);
+            }
+            _chatList.Children.Add(row);
             try { _chatScroll.ScrollToEnd(); } catch { }
+        }
+
+        void AddThinkingBubble()
+        {
+            if (_chatList == null || _chatThinking != null) return;
+            var tb = new TextBlock
+            {
+                Text = "豆仔正在想 ···",
+                FontSize = 12.5,
+                FontStyle = FontStyles.Italic,
+                FontFamily = new FontFamily("Microsoft YaHei UI"),
+                Foreground = new SolidColorBrush(Col(0xFF, 0x6E, 0x7C, 0x9C))
+            };
+            var bubble = new Border
+            {
+                Child = tb,
+                CornerRadius = new CornerRadius(4, 14, 14, 14),
+                Padding = new Thickness(12, 8, 12, 8),
+                Background = new SolidColorBrush(Col(0xCC, 0xEC, 0xF1, 0xFC)),
+                VerticalAlignment = VerticalAlignment.Top
+            };
+            var row = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(6, 5, 6, 5),
+                HorizontalAlignment = HorizontalAlignment.Left
+            };
+            row.Children.Add(MakePetAvatar(26));
+            row.Children.Add(bubble);
+            _chatThinking = bubble;
+            _chatList.Children.Add(row);
+            try { _chatScroll.ScrollToEnd(); } catch { }
+        }
+
+        void RemoveThinkingBubble()
+        {
+            _chatThinking = null;
+            if (_chatList == null) return;
+            // 最后一层就是"思考中"那一行，直接摘掉
+            int n = _chatList.Children.Count;
+            if (n > 0) _chatList.Children.RemoveAt(n - 1);
         }
 
         void UpdateChatHint()
         {
+            if (_chatDot != null)
+                _chatDot.Fill = new SolidColorBrush(IsAiConfigured() ? Col(0xFF, 0x5B, 0xD0, 0x8A) : Col(0xFF, 0x6B, 0x76, 0x90));
             if (_chatHint == null) return;
             string host = "未配置";
             try
@@ -2560,15 +2750,17 @@ namespace DesktopPet
                     host = new Uri(NormalizeChatUrl(_aiUrl)).Host;
             }
             catch { host = _aiUrl; }
-            _chatHint.Text = "模型：" + (string.IsNullOrEmpty(_aiModel) ? "未填" : _aiModel) + "  ·  接口：" + host
-                           + (string.IsNullOrEmpty(_aiUrl) ? "（点「设置」配置，或先当传话筒用）" : "");
+            _chatHint.Text = "模型 " + (string.IsNullOrEmpty(_aiModel) ? "未填" : _aiModel)
+                           + "  ·  " + host
+                           + (string.IsNullOrEmpty(_aiUrl) ? "  ·  先去「设置」配接口" : "");
         }
 
         void ClearChat()
         {
             _chatHistory.Clear();
+            _chatThinking = null;
             if (_chatList != null) _chatList.Children.Clear();
-            AddChatBubble(IsAiConfigured() ? "清空啦，想聊点什么？" : "清空啦～先点「设置」填模型接口，我们就能聊天了。", false, true);
+            AddChatBubble(IsAiConfigured() ? "清空啦，想聊点什么？" : "清空啦～先点「设置」填模型接口，我们就能聊天了。", false, IsAiConfigured() ? false : true);
         }
 
         bool IsAiConfigured() { return !string.IsNullOrEmpty(_aiUrl) && !string.IsNullOrEmpty(_aiModel); }
@@ -2598,7 +2790,8 @@ namespace DesktopPet
                 msgs.Add(new string[] { _chatHistory[i][0], _chatHistory[i][1] });
 
             _chatBusy = true;
-            if (_chatSend != null) _chatSend.IsEnabled = false;
+            if (_chatSend != null) _chatSend.Opacity = 0.45;
+            AddThinkingBubble();
             ShowBubble("豆仔想想…", true, 40.0);
             Log.Write("ai ask model=" + model);
 
@@ -2610,7 +2803,8 @@ namespace DesktopPet
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     _chatBusy = false;
-                    if (_chatSend != null) _chatSend.IsEnabled = true;
+                    if (_chatSend != null) _chatSend.Opacity = 1.0;
+                    RemoveThinkingBubble();
                     if (reply != null)
                     {
                         _chatHistory.Add(new string[] { "assistant", reply });
@@ -2632,45 +2826,91 @@ namespace DesktopPet
         {
             try
             {
+                var font = new FontFamily("Microsoft YaHei UI");
                 var dlg = new Window
                 {
                     Title = "模型接口设置",
-                    Width = 450,
-                    Height = 440,
+                    Width = 460,
+                    Height = 470,
                     WindowStartupLocation = WindowStartupLocation.CenterScreen,
                     Topmost = true,
-                    ResizeMode = ResizeMode.NoResize
+                    ResizeMode = ResizeMode.NoResize,
+                    Background = new SolidColorBrush(Col(0xFF, 0x14, 0x1A, 0x2C)),
+                    FontFamily = font
                 };
-                var sp = new StackPanel { Margin = new Thickness(16) };
-                sp.Children.Add(new TextBlock { Text = "OpenAI 兼容接口", FontWeight = FontWeights.Bold, FontSize = 14, Margin = new Thickness(0, 0, 0, 10) });
-                sp.Children.Add(new TextBlock { Text = "接口地址（base，例：https://api.deepseek.com/v1 或 https://ark.cn-beijing.volces.com/api/v3）", Foreground = Brushes.Gray, TextWrapping = TextWrapping.Wrap });
-                var tbUrl = new TextBox { Text = _aiUrl, Margin = new Thickness(0, 3, 0, 8) };
-                sp.Children.Add(tbUrl);
-                sp.Children.Add(new TextBlock { Text = "API Key（只存在本机 config.ini，可留空）", Foreground = Brushes.Gray });
-                var tbKey = new TextBox { Text = _aiKey, Margin = new Thickness(0, 3, 0, 8) };
-                sp.Children.Add(tbKey);
-                sp.Children.Add(new TextBlock { Text = "模型名（例：deepseek-chat / gpt-4o-mini / qwen2.5 / 豆包推理接入点 ep-xxx）", Foreground = Brushes.Gray, TextWrapping = TextWrapping.Wrap });
-                var tbModel = new TextBox { Text = _aiModel, Margin = new Thickness(0, 3, 0, 8) };
-                sp.Children.Add(tbModel);
-                sp.Children.Add(new TextBlock { Text = "人设提示词（可选）", Foreground = Brushes.Gray });
+                var sp = new StackPanel { Margin = new Thickness(18) };
+                var title = new TextBlock
+                {
+                    Text = "OpenAI 兼容接口",
+                    FontSize = 16,
+                    FontWeight = FontWeights.Bold,
+                    Foreground = Brushes.White,
+                    Margin = new Thickness(0, 0, 0, 4)
+                };
+                sp.Children.Add(title);
+                var sub = new TextBlock
+                {
+                    Text = "填 base 地址即可，程序会自动补 /chat/completions",
+                    FontSize = 11,
+                    Foreground = new SolidColorBrush(Col(0xFF, 0x86, 0x93, 0xB0)),
+                    Margin = new Thickness(0, 0, 0, 12)
+                };
+                sp.Children.Add(sub);
+
+                Func<string, string, TextBox> addField = delegate(string label, string value)
+                {
+                    sp.Children.Add(new TextBlock
+                    {
+                        Text = label,
+                        FontSize = 11.5,
+                        Foreground = new SolidColorBrush(Col(0xFF, 0x9A, 0xA7, 0xC4)),
+                        Margin = new Thickness(0, 2, 0, 3)
+                    });
+                    var box = new TextBox
+                    {
+                        Text = value ?? "",
+                        FontSize = 13,
+                        Foreground = new SolidColorBrush(Col(0xFF, 0xEA, 0xF0, 0xFC)),
+                        Background = new SolidColorBrush(Col(0xFF, 0x0E, 0x14, 0x24)),
+                        BorderBrush = new SolidColorBrush(Col(0xFF, 0x33, 0x40, 0x6B)),
+                        BorderThickness = new Thickness(1),
+                        Padding = new Thickness(7, 5, 7, 5),
+                        CaretBrush = Brushes.White,
+                        Margin = new Thickness(0, 0, 0, 10)
+                    };
+                    sp.Children.Add(box);
+                    return box;
+                };
+                var tbUrl = addField("接口地址（base，例：https://api.deepseek.com/v1）", _aiUrl);
+                var tbKey = addField("API Key（只存本机 config.ini，可留空）", _aiKey);
+                var tbModel = addField("模型名（deepseek-chat / ep-xxx / qwen2.5 …）", _aiModel);
+                sp.Children.Add(new TextBlock
+                {
+                    Text = "人设提示词（可选）",
+                    FontSize = 11.5,
+                    Foreground = new SolidColorBrush(Col(0xFF, 0x9A, 0xA7, 0xC4)),
+                    Margin = new Thickness(0, 2, 0, 3)
+                });
                 var tbPrompt = new TextBox
                 {
                     Text = string.IsNullOrEmpty(_aiPrompt) ? DefaultAiPrompt : _aiPrompt,
                     AcceptsReturn = true,
-                    Height = 74,
+                    Height = 76,
+                    FontSize = 12.5,
                     TextWrapping = TextWrapping.Wrap,
                     VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                    Margin = new Thickness(0, 3, 0, 12)
+                    Foreground = new SolidColorBrush(Col(0xFF, 0xEA, 0xF0, 0xFC)),
+                    Background = new SolidColorBrush(Col(0xFF, 0x0E, 0x14, 0x24)),
+                    BorderBrush = new SolidColorBrush(Col(0xFF, 0x33, 0x40, 0x6B)),
+                    BorderThickness = new Thickness(1),
+                    Padding = new Thickness(7, 5, 7, 5),
+                    CaretBrush = Brushes.White,
+                    Margin = new Thickness(0, 0, 0, 14)
                 };
                 sp.Children.Add(tbPrompt);
+
                 var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-                var btnSave = new Button { Content = "保存", Width = 80, IsDefault = true, Margin = new Thickness(0, 0, 8, 0) };
-                var btnCancel = new Button { Content = "取消", Width = 80, IsCancel = true };
-                row.Children.Add(btnSave);
-                row.Children.Add(btnCancel);
-                sp.Children.Add(row);
-                dlg.Content = sp;
-                btnSave.Click += delegate
+                var btnSave = MakePillButton("保存", delegate
                 {
                     _aiUrl = (tbUrl.Text ?? "").Trim();
                     _aiKey = (tbKey.Text ?? "").Trim();
@@ -2680,7 +2920,13 @@ namespace DesktopPet
                     UpdateChatHint();
                     Log.Write("ai settings saved url=" + _aiUrl + " model=" + _aiModel);
                     dlg.Close();
-                };
+                }, true);
+                btnSave.Margin = new Thickness(0, 0, 8, 0);
+                var btnCancel = MakePillButton("取消", delegate { dlg.Close(); }, false);
+                row.Children.Add(btnSave);
+                row.Children.Add(btnCancel);
+                sp.Children.Add(row);
+                dlg.Content = sp;
                 dlg.ShowDialog();
             }
             catch (Exception ex) { Log.Write("ai settings: " + ex.Message); }
@@ -2698,85 +2944,184 @@ namespace DesktopPet
                     return;
                 }
 
+                var font = new FontFamily("Microsoft YaHei UI");
                 var win = new Window
                 {
                     Title = "豆仔 · AI 聊天",
-                    Width = 390,
-                    Height = 540,
-                    MinWidth = 330,
-                    MinHeight = 380,
+                    Width = 400,
+                    Height = 560,
+                    MinWidth = 340,
+                    MinHeight = 400,
                     WindowStartupLocation = WindowStartupLocation.CenterScreen,
                     Topmost = true,
                     ResizeMode = ResizeMode.CanResizeWithGrip,
-                    Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x15, 0x1A, 0x2B))
+                    FontFamily = font,
+                    Background = ChatGrad(0xFF, 0x101628, 0xFF, 0x1A223E)
                 };
                 var root = new Grid();
-                root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
                 root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
                 root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
                 root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-                var header = new Grid { Margin = new Thickness(12, 10, 12, 4) };
-                header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-                header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-                header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-                var title = new TextBlock
+                // ---- 顶部：头像 + 标题 + 状态 + 按钮 ----
+                var header = new Border
+                {
+                    Background = ChatGrad(0xFF, 0x1E2746, 0xFF, 0x161D36),
+                    BorderBrush = new SolidColorBrush(Col(0xFF, 0x2C, 0x38, 0x5C)),
+                    BorderThickness = new Thickness(0, 0, 0, 1),
+                    Padding = new Thickness(14, 11, 12, 11)
+                };
+                var headerGrid = new Grid();
+                headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                var av = MakePetAvatar(34);
+                av.Margin = new Thickness(0, 0, 10, 0);
+                Grid.SetColumn(av, 0);
+                headerGrid.Children.Add(av);
+                var titleStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+                titleStack.Children.Add(new TextBlock
                 {
                     Text = "豆仔 · AI 聊天",
-                    Foreground = Brushes.White,
                     FontSize = 15,
                     FontWeight = FontWeights.Bold,
-                    VerticalAlignment = VerticalAlignment.Center
+                    Foreground = Brushes.White
+                });
+                var hintRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 3, 0, 0) };
+                _chatDot = new System.Windows.Shapes.Ellipse
+                {
+                    Width = 6, Height = 6,
+                    Fill = new SolidColorBrush(Col(0xFF, 0x6B, 0x76, 0x90)),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 0, 5, 0)
                 };
-                Grid.SetColumn(title, 0);
-                header.Children.Add(title);
-                var btnSet = new Button { Content = "设置", Padding = new Thickness(9, 3, 9, 3), Margin = new Thickness(4, 0, 0, 0) };
-                btnSet.Click += delegate { ShowAiSettings(); };
-                Grid.SetColumn(btnSet, 1);
-                header.Children.Add(btnSet);
-                var btnClear = new Button { Content = "清空", Padding = new Thickness(9, 3, 9, 3), Margin = new Thickness(4, 0, 0, 0) };
-                btnClear.Click += delegate { ClearChat(); };
-                Grid.SetColumn(btnClear, 2);
-                header.Children.Add(btnClear);
-                root.Children.Add(header);
-                Grid.SetRow(header, 0);
-
+                hintRow.Children.Add(_chatDot);
                 _chatHint = new TextBlock
                 {
                     FontSize = 11,
-                    Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0x8C, 0x98, 0xB0)),
-                    Margin = new Thickness(14, 0, 14, 6),
-                    TextWrapping = TextWrapping.Wrap
+                    Foreground = new SolidColorBrush(Col(0xFF, 0x8C, 0x98, 0xB4)),
+                    TextWrapping = TextWrapping.Wrap,
+                    VerticalAlignment = VerticalAlignment.Center
                 };
-                root.Children.Add(_chatHint);
-                Grid.SetRow(_chatHint, 1);
+                hintRow.Children.Add(_chatHint);
+                titleStack.Children.Add(hintRow);
+                Grid.SetColumn(titleStack, 1);
+                headerGrid.Children.Add(titleStack);
+                var headerBtns = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+                var btnSet = MakePillButton("设置", delegate { ShowAiSettings(); }, false);
+                btnSet.Margin = new Thickness(0, 0, 6, 0);
+                headerBtns.Children.Add(btnSet);
+                headerBtns.Children.Add(MakePillButton("清空", delegate { ClearChat(); }, false));
+                Grid.SetColumn(headerBtns, 2);
+                headerGrid.Children.Add(headerBtns);
+                header.Child = headerGrid;
+                root.Children.Add(header);
+                Grid.SetRow(header, 0);
 
+                // ---- 消息区：深色圆角 + 两团水彩光 ----
+                var msgWrap = new Grid { Margin = new Thickness(10, 8, 10, 6) };
+                var msgBg = new Border
+                {
+                    CornerRadius = new CornerRadius(14),
+                    Background = new SolidColorBrush(Col(0xFF, 0x0D, 0x12, 0x22)),
+                    BorderBrush = new SolidColorBrush(Col(0xFF, 0x22, 0x2C, 0x4A)),
+                    BorderThickness = new Thickness(1)
+                };
+                msgWrap.Children.Add(msgBg);
+                var blobs = new Canvas { IsHitTestVisible = false };
+                var blob1 = new System.Windows.Shapes.Ellipse { Width = 210, Height = 160 };
+                var b1 = new RadialGradientBrush();
+                b1.GradientStops.Add(new GradientStop(WithAlpha(Col(0xFF, 0x4E, 0x7F, 0xE0), 0x22), 0.0));
+                b1.GradientStops.Add(new GradientStop(WithAlpha(Col(0xFF, 0x4E, 0x7F, 0xE0), 0x00), 1.0));
+                b1.Freeze();
+                blob1.Fill = b1;
+                Canvas.SetLeft(blob1, -50);
+                Canvas.SetTop(blob1, -60);
+                blobs.Children.Add(blob1);
+                var blob2 = new System.Windows.Shapes.Ellipse { Width = 240, Height = 170 };
+                var b2 = new RadialGradientBrush();
+                b2.GradientStops.Add(new GradientStop(WithAlpha(Col(0xFF, 0x8A, 0x6B, 0xFF), 0x1E), 0.0));
+                b2.GradientStops.Add(new GradientStop(WithAlpha(Col(0xFF, 0x8A, 0x6B, 0xFF), 0x00), 1.0));
+                b2.Freeze();
+                blob2.Fill = b2;
+                Canvas.SetRight(blob2, -60);
+                Canvas.SetBottom(blob2, -70);
+                blobs.Children.Add(blob2);
+                msgWrap.Children.Add(blobs);
                 _chatScroll = new ScrollViewer
                 {
                     VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                    Margin = new Thickness(10, 2, 10, 6),
-                    Padding = new Thickness(2),
-                    Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x10, 0x14, 0x22))
+                    Padding = new Thickness(2, 6, 2, 6),
+                    Background = Brushes.Transparent
                 };
                 _chatList = new StackPanel();
                 _chatScroll.Content = _chatList;
-                root.Children.Add(_chatScroll);
-                Grid.SetRow(_chatScroll, 2);
+                msgWrap.Children.Add(_chatScroll);
+                root.Children.Add(msgWrap);
+                Grid.SetRow(msgWrap, 1);
 
-                var inputBar = new DockPanel { Margin = new Thickness(10, 4, 10, 12), LastChildFill = true };
-                _chatSend = new Button { Content = "发送", Width = 66, Margin = new Thickness(6, 0, 0, 0) };
-                _chatSend.Click += delegate { SendChat(); };
+                // ---- 输入区：圆角输入框 + 胶囊发送 ----
+                var inputOuter = new Grid { Margin = new Thickness(10, 2, 10, 12) };
+                _chatInputWrap = new Border
+                {
+                    CornerRadius = new CornerRadius(14),
+                    Background = new SolidColorBrush(Col(0xFF, 0x1A, 0x23, 0x40)),
+                    BorderBrush = new SolidColorBrush(Col(0xFF, 0x33, 0x40, 0x6B)),
+                    BorderThickness = new Thickness(1.4),
+                    Padding = new Thickness(10, 2, 6, 2)
+                };
+                inputOuter.Children.Add(_chatInputWrap);
+                var inputDock = new DockPanel { LastChildFill = true };
+                _chatSend = MakePillButton("发送", delegate { SendChat(); }, true);
+                _chatSend.Margin = new Thickness(8, 0, 0, 0);
                 DockPanel.SetDock(_chatSend, Dock.Right);
-                _chatInput = new TextBox { FontSize = 13, Padding = new Thickness(6, 4, 6, 4) };
+                inputDock.Children.Add(_chatSend);
+                var inputGrid = new Grid();
+                _chatInput = new TextBox
+                {
+                    FontSize = 13.5,
+                    Foreground = new SolidColorBrush(Col(0xFF, 0xEA, 0xF0, 0xFC)),
+                    Background = Brushes.Transparent,
+                    BorderThickness = new Thickness(0),
+                    CaretBrush = Brushes.White,
+                    Padding = new Thickness(2, 7, 2, 7),
+                    VerticalContentAlignment = VerticalAlignment.Center
+                };
+                inputGrid.Children.Add(_chatInput);
+                _chatPlaceholder = new TextBlock
+                {
+                    Text = "和豆仔说点什么…",
+                    FontSize = 13,
+                    Foreground = new SolidColorBrush(Col(0xFF, 0x64, 0x70, 0x8E)),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(4, 0, 0, 0),
+                    IsHitTestVisible = false
+                };
+                inputGrid.Children.Add(_chatPlaceholder);
+                inputDock.Children.Add(inputGrid);
+                _chatInputWrap.Child = inputDock;
+                root.Children.Add(inputOuter);
+                Grid.SetRow(inputOuter, 2);
+
+                _chatInput.TextChanged += delegate
+                {
+                    if (_chatPlaceholder != null)
+                        _chatPlaceholder.Visibility = string.IsNullOrEmpty(_chatInput.Text) ? Visibility.Visible : Visibility.Collapsed;
+                };
+                _chatInput.GotFocus += delegate
+                {
+                    if (_chatInputWrap != null)
+                        _chatInputWrap.BorderBrush = new SolidColorBrush(Col(0xFF, 0x6B, 0x8F, 0xF0));
+                };
+                _chatInput.LostFocus += delegate
+                {
+                    if (_chatInputWrap != null)
+                        _chatInputWrap.BorderBrush = new SolidColorBrush(Col(0xFF, 0x33, 0x40, 0x6B));
+                };
                 _chatInput.KeyDown += delegate(object s2, KeyEventArgs e2)
                 {
                     if (e2.Key == Key.Enter || e2.Key == Key.Return) { SendChat(); e2.Handled = true; }
                 };
-                inputBar.Children.Add(_chatSend);
-                inputBar.Children.Add(_chatInput);
-                root.Children.Add(inputBar);
-                Grid.SetRow(inputBar, 3);
-
                 win.Content = root;
                 win.Closed += delegate
                 {
@@ -2784,8 +3129,12 @@ namespace DesktopPet
                     _chatList = null;
                     _chatScroll = null;
                     _chatInput = null;
+                    _chatInputWrap = null;
                     _chatSend = null;
                     _chatHint = null;
+                    _chatPlaceholder = null;
+                    _chatDot = null;
+                    _chatThinking = null;
                 };
                 win.PreviewKeyDown += delegate(object s2, KeyEventArgs e2)
                 {
