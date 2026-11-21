@@ -326,8 +326,9 @@ namespace DesktopPet
             PreviewMouseLeftButtonUp += OnDragEnd;   // FIX-CLICK-WAKE P0-1：预览隧道，抢在子元素吞 up 之前
             LostMouseCapture += OnLostCapture;       // 捕获丢失兜底，绝不允许卡在 dragging
             MouseMove += OnMove;
-            // P0-1：右键改为 WPF 菜单（不再直接打开浏览器）
-            MouseRightButtonUp += delegate { TryOpenMenu(); };
+            // P0-1：右键改走轮盘菜单（12 格环）；万一轮盘构建失败自动退回列表菜单
+            MouseRightButtonDown += OnRadialDown;
+            MouseRightButtonUp += OnRadialUp;
             KeyDown += delegate(object s, KeyEventArgs e)
             {
                 if (e.Key == Key.Escape) Close();              // Esc：退出
@@ -394,6 +395,7 @@ namespace DesktopPet
         {
             try
             {
+                CloseRadial();                // 轮盘开着就一起收掉，别留一个空壳 popup
                 if (_orbWindow != null)
                 {
                     _orbWindow.Close();       // FIX-ORB：主人关了，魔法球也得跟着关，否则会剩一只光球在桌面上
@@ -429,6 +431,10 @@ namespace DesktopPet
         static extern int GetWindowLong(IntPtr hWnd, int nIndex);
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        // 轮盘弹窗要压在豆仔身上（豆仔主窗是 Topmost，普通 popup 会被它盖住）
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
         // ================= P0-1 托盘 =================
 
@@ -597,7 +603,8 @@ namespace DesktopPet
                 miUrl.Click += delegate { OpenUrl(); };
                 menu.Items.Add(miUrl);
 
-                ContextMenu = menu;
+                ContextMenu = null;              // 右键改走轮盘菜单；列表菜单留着做兜底
+                _menuFallback = menu;
             }
             catch (Exception ex)
             {
@@ -616,10 +623,354 @@ namespace DesktopPet
         {
             try
             {
-                if (ContextMenu != null)
-                    ContextMenu.IsOpen = true;
+                if (_menuFallback != null)
+                {
+                    _menuFallback.PlacementTarget = this;
+                    _menuFallback.IsOpen = true;
+                }
             }
             catch (Exception ex) { Log.Write("menu open: " + ex.Message); }
+        }
+
+        // ================= 轮盘菜单（右键） =================
+        // 12 格环：右键按下即弹出；按住拖到格子松手 = 直接选中（快）；只点一下不拖 = 保持展开，
+        // 移到格子左键点一下选中；点中心/圈外、或再点右键 = 取消。
+        // 命中判定在宠物窗口里用全局光标算（鼠标已被 Capture，popup 自己不收消息）
+        class RadialItem
+        {
+            public string Label;
+            public Action Run;
+            public Func<bool> IsOn;          // 开关项的当前状态，null = 普通项
+            public Func<string> DynLabel;    // 动态文字（睡眠/唤醒）
+            public System.Windows.Shapes.Path Shape;
+            public TextBlock Text;
+            public TextBlock Tick;
+        }
+
+        const double RadialSize = 344;
+        const double RadialOuter = 152;
+        const double RadialInner = 58;
+        const int RadialCount = 12;
+
+        System.Windows.Controls.Primitives.Popup _radial;
+        Canvas _radialCanvas;
+        List<RadialItem> _radialItems;
+        bool _radialOpen;
+        int _radialHover = -1;
+        double _radialMoveMax;
+        Point _radialDownScreen;
+        double _radialCx, _radialCy;
+        Brush _radialFillNorm, _radialFillHot, _radialTextNorm, _radialTextHot;
+        ContextMenu _menuFallback;
+
+        void BuildRadial()
+        {
+            _radialFillNorm = new SolidColorBrush(Color.FromArgb(0xF2, 0x12, 0x1C, 0x2E));
+            _radialFillHot = new SolidColorBrush(Color.FromArgb(0xFC, 0x3C, 0x8C, 0xD2));
+            _radialTextNorm = new SolidColorBrush(Color.FromArgb(0xFF, 0xDA, 0xEB, 0xFF));
+            _radialTextHot = Brushes.White;
+
+            _radialCanvas = new Canvas { Width = RadialSize, Height = RadialSize, IsHitTestVisible = false, Background = Brushes.Transparent };
+            double cx = RadialSize / 2.0, cy = RadialSize / 2.0;
+
+            var ring = new System.Windows.Shapes.Ellipse
+            {
+                Width = (RadialOuter + 4) * 2,
+                Height = (RadialOuter + 4) * 2,
+                Stroke = new SolidColorBrush(Color.FromArgb(0x55, 0x9C, 0xD2, 0xFF)),
+                StrokeThickness = 1.2,
+                Fill = new SolidColorBrush(Color.FromArgb(0x2A, 0x08, 0x10, 0x1C))
+            };
+            Canvas.SetLeft(ring, cx - RadialOuter - 4);
+            Canvas.SetTop(ring, cy - RadialOuter - 4);
+            _radialCanvas.Children.Add(ring);
+
+            // 底盘：扇区之间留了缝，没有这层深色垫底，缝里会露出下面的桌面文字（很脏）
+            var baseGeo = new PathGeometry { FillRule = FillRule.EvenOdd };
+            var fOut = new PathFigure { StartPoint = new Point(cx - RadialOuter, cy), IsClosed = true };
+            fOut.Segments.Add(new ArcSegment { Point = new Point(cx + RadialOuter, cy), Size = new Size(RadialOuter, RadialOuter), SweepDirection = SweepDirection.Clockwise });
+            fOut.Segments.Add(new ArcSegment { Point = new Point(cx - RadialOuter, cy), Size = new Size(RadialOuter, RadialOuter), SweepDirection = SweepDirection.Clockwise });
+            var fIn = new PathFigure { StartPoint = new Point(cx - RadialInner, cy), IsClosed = true };
+            fIn.Segments.Add(new ArcSegment { Point = new Point(cx + RadialInner, cy), Size = new Size(RadialInner, RadialInner), SweepDirection = SweepDirection.Counterclockwise });
+            fIn.Segments.Add(new ArcSegment { Point = new Point(cx - RadialInner, cy), Size = new Size(RadialInner, RadialInner), SweepDirection = SweepDirection.Counterclockwise });
+            baseGeo.Figures.Add(fOut);
+            baseGeo.Figures.Add(fIn);
+            var baseDonut = new System.Windows.Shapes.Path { Data = baseGeo, Fill = new SolidColorBrush(Color.FromArgb(0xE8, 0x0A, 0x12, 0x20)) };
+            _radialCanvas.Children.Add(baseDonut);
+
+            var dot = new System.Windows.Shapes.Ellipse
+            {
+                Width = RadialInner * 2,
+                Height = RadialInner * 2,
+                Fill = new SolidColorBrush(Color.FromArgb(0xEC, 0x0A, 0x12, 0x20)),
+                Stroke = new SolidColorBrush(Color.FromArgb(0x60, 0x8F, 0xC8, 0xFF)),
+                StrokeThickness = 1
+            };
+            Canvas.SetLeft(dot, cx - RadialInner);
+            Canvas.SetTop(dot, cy - RadialInner);
+            _radialCanvas.Children.Add(dot);
+
+            var cxText = new TextBlock
+            {
+                Text = "取消",
+                FontSize = 12,
+                Foreground = _radialTextNorm,
+                Width = 64,
+                TextAlignment = TextAlignment.Center,
+                FontFamily = new FontFamily("Microsoft YaHei UI")
+            };
+            Canvas.SetLeft(cxText, cx - 32);
+            Canvas.SetTop(cxText, cy - 9);
+            _radialCanvas.Children.Add(cxText);
+
+            _radialItems = new List<RadialItem>();
+            AddRadialItem(0, "说话", delegate { ShowSpeakDialog(); }, null, null);
+            AddRadialItem(1, "弹跳", delegate { ApiAction("bounce"); }, null, null);
+            AddRadialItem(2, "摇头", delegate { ApiAction("shake"); }, null, null);
+            AddRadialItem(3, "转圈", delegate { ApiAction("turn"); }, null, null);
+            AddRadialItem(4, "害羞", delegate { ApiAction("blush"); }, null, null);
+            AddRadialItem(5, "睡眠", delegate { ToggleDoze(); }, null, delegate { return IsDoze() ? "唤醒" : "睡眠"; });
+            AddRadialItem(6, "魔法球", delegate { ToggleOrb(); }, delegate { return _orbEnabled; }, null);
+            AddRadialItem(7, "暂停", delegate { ApiPause(!_paused); }, delegate { return _paused; }, null);
+            AddRadialItem(8, "跟随", delegate { ToggleFollowMouse(); }, delegate { return _followMouse; }, null);
+            AddRadialItem(9, "自启", delegate { ToggleAutoStart(); }, delegate { return AutoStart.IsEnabled(); }, null);
+            AddRadialItem(10, "隐藏", delegate { ApiSetVisible(false); }, null, null);
+            AddRadialItem(11, "退出", delegate { Close(); }, null, null);
+
+            _radial = new System.Windows.Controls.Primitives.Popup
+            {
+                Child = _radialCanvas,
+                AllowsTransparency = true,
+                StaysOpen = true,
+                IsHitTestVisible = false,
+                PlacementTarget = this,
+                Placement = System.Windows.Controls.Primitives.PlacementMode.Relative
+            };
+        }
+
+        void AddRadialItem(int index, string label, Action run, Func<bool> isOn, Func<string> dyn)
+        {
+            double cx = RadialSize / 2.0, cy = RadialSize / 2.0;
+            double mid = -90.0 + index * (360.0 / RadialCount);
+            double half = (360.0 / RadialCount) / 2.0;
+            double gap = 1.6;   // 扇区之间留一点缝，视觉上更清楚
+            double a0 = (mid - half + gap) * Math.PI / 180.0;
+            double a1 = (mid + half - gap) * Math.PI / 180.0;
+
+            var p0 = new Point(cx + RadialOuter * Math.Cos(a0), cy + RadialOuter * Math.Sin(a0));
+            var p1 = new Point(cx + RadialOuter * Math.Cos(a1), cy + RadialOuter * Math.Sin(a1));
+            var p2 = new Point(cx + RadialInner * Math.Cos(a1), cy + RadialInner * Math.Sin(a1));
+            var p3 = new Point(cx + RadialInner * Math.Cos(a0), cy + RadialInner * Math.Sin(a0));
+
+            var fig = new PathFigure { StartPoint = p0, IsClosed = true, IsFilled = true };
+            fig.Segments.Add(new ArcSegment { Point = p1, Size = new Size(RadialOuter, RadialOuter), SweepDirection = SweepDirection.Clockwise });
+            fig.Segments.Add(new LineSegment { Point = p2 });
+            fig.Segments.Add(new ArcSegment { Point = p3, Size = new Size(RadialInner, RadialInner), SweepDirection = SweepDirection.Counterclockwise });
+            var geo = new PathGeometry();
+            geo.Figures.Add(fig);
+
+            var shape = new System.Windows.Shapes.Path
+            {
+                Data = geo,
+                Fill = _radialFillNorm,
+                Stroke = new SolidColorBrush(Color.FromArgb(0x38, 0x8F, 0xC8, 0xFF)),
+                StrokeThickness = 1
+            };
+            _radialCanvas.Children.Add(shape);
+
+            double r = (RadialOuter + RadialInner) / 2.0;
+            var text = new TextBlock
+            {
+                Text = label,
+                FontSize = 12,
+                FontFamily = new FontFamily("Microsoft YaHei UI"),
+                Foreground = _radialTextNorm,
+                Width = 64,
+                TextAlignment = TextAlignment.Center
+            };
+            Canvas.SetLeft(text, cx + r * Math.Cos(mid * Math.PI / 180.0) - 36);
+            Canvas.SetTop(text, cy + r * Math.Sin(mid * Math.PI / 180.0) - 9);
+            _radialCanvas.Children.Add(text);
+
+            var tick = new TextBlock
+            {
+                Text = "✓",
+                FontSize = 10,
+                FontFamily = new FontFamily("Microsoft YaHei UI"),
+                Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0x7E, 0xD8, 0xFF)),
+                Width = 14,
+                TextAlignment = TextAlignment.Center,
+                Visibility = Visibility.Hidden
+            };
+            double rt = RadialOuter - 12;
+            Canvas.SetLeft(tick, cx + rt * Math.Cos(mid * Math.PI / 180.0) - 7);
+            Canvas.SetTop(tick, cy + rt * Math.Sin(mid * Math.PI / 180.0) - 7);
+            _radialCanvas.Children.Add(tick);
+
+            _radialItems.Add(new RadialItem { Label = label, Run = run, IsOn = isOn, DynLabel = dyn, Shape = shape, Text = text, Tick = tick });
+        }
+
+        bool IsDoze() { return _state == State.Doze; }
+
+        void ToggleDoze()
+        {
+            if (IsDoze()) { Wake(); SetMood("neutral"); }
+            else EnterDoze();
+            Log.Write("radial doze=" + IsDoze());
+        }
+
+        void ToggleOrb()
+        {
+            _orbEnabled = !_orbEnabled;
+            if (!_orbEnabled && _state == State.Walk && _hasWalkTarget) { _hasWalkTarget = false; EnterIdle(); }
+            Log.Write("orb=" + _orbEnabled);
+        }
+
+        void ToggleFollowMouse()
+        {
+            _followMouse = !_followMouse;
+            Log.Write("follow mouse=" + _followMouse);
+            OnFollowChanged();
+        }
+
+        void ToggleAutoStart()
+        {
+            AutoStart.Set(!AutoStart.IsEnabled());
+            Log.Write("autostart=" + AutoStart.IsEnabled());
+        }
+
+        Point CursorDip()
+        {
+            NativePoint cp;
+            if (!GetCursorPos(out cp)) return new Point(_radialCx, _radialCy);
+            var src = PresentationSource.FromVisual(this);
+            double s = src != null ? src.CompositionTarget.TransformToDevice.M11 : 1.0;
+            return new Point(cp.X / s, cp.Y / s);
+        }
+
+        void ShowRadialMenu()
+        {
+            if (_radial == null) BuildRadial();
+            _radial.IsOpen = false;              // 先关一次，保证每次都是干净的新位置
+
+            // 开关项状态刷新
+            for (int i = 0; i < _radialItems.Count; i++)
+            {
+                var it = _radialItems[i];
+                if (it.DynLabel != null) it.Text.Text = it.DynLabel();
+                if (it.IsOn != null) it.Tick.Visibility = it.IsOn() ? Visibility.Visible : Visibility.Hidden;
+            }
+
+            var area = WorkArea();
+            double wantX = Left + Width / 2.0;
+            double wantY = Top + 160.0;
+            _radialCx = Math.Min(Math.Max(wantX, area.Left + RadialOuter + 6), area.Right - RadialOuter - 6);
+            _radialCy = Math.Min(Math.Max(wantY, area.Top + RadialOuter + 6), area.Bottom - RadialOuter - 6);
+
+            _radial.PlacementTarget = this;
+            _radial.Placement = System.Windows.Controls.Primitives.PlacementMode.Relative;
+            _radial.HorizontalOffset = _radialCx - Left - RadialSize / 2.0;
+            _radial.VerticalOffset = _radialCy - Top - RadialSize / 2.0;
+            _radial.IsOpen = true;
+
+            // popup 默认在 Topmost 主窗之下 → 手动提成置顶，否则豆仔会盖住轮盘
+            try
+            {
+                var hs = PresentationSource.FromVisual(_radialCanvas) as System.Windows.Interop.HwndSource;
+                if (hs != null) SetWindowPos(hs.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0013);   // TOPMOST|NOMOVE|NOSIZE|NOACTIVATE
+            }
+            catch (Exception ex) { Log.Write("radial topmost: " + ex.Message); }
+
+            _radialOpen = true;
+            _radialHover = -1;
+            _radialMoveMax = 0;
+            _radialDownScreen = CursorDip();
+            ApplyRadialHover();
+            CaptureMouse();
+            Log.Write("radial open at " + (int)_radialCx + "," + (int)_radialCy);
+        }
+
+        void CloseRadial()
+        {
+            if (!_radialOpen) return;
+            _radialOpen = false;
+            _radialHover = -1;
+            try { if (_radial != null) _radial.IsOpen = false; } catch { }
+            if (IsMouseCaptured) ReleaseMouseCapture();
+            Log.Write("radial close");
+        }
+
+        int HitRadial()
+        {
+            var p = CursorDip();
+            double dx = p.X - _radialCx, dy = p.Y - _radialCy;
+            double r = Math.Sqrt(dx * dx + dy * dy);
+            if (r < RadialInner || r > RadialOuter) return -1;
+            double ang = Math.Atan2(dy, dx) * 180.0 / Math.PI;      // 0 = 正右
+            double idx = Math.Round((ang + 90.0) / (360.0 / RadialCount));
+            int i = ((int)idx) % RadialCount;
+            if (i < 0) i += RadialCount;
+            return i;
+        }
+
+        void UpdateRadialHover()
+        {
+            if (!_radialOpen) return;
+            var p = CursorDip();
+            double d = Math.Sqrt((p.X - _radialDownScreen.X) * (p.X - _radialDownScreen.X) + (p.Y - _radialDownScreen.Y) * (p.Y - _radialDownScreen.Y));
+            if (d > _radialMoveMax) _radialMoveMax = d;
+            int h = HitRadial();
+            if (h != _radialHover) { _radialHover = h; ApplyRadialHover(); }
+        }
+
+        void ApplyRadialHover()
+        {
+            if (_radialItems == null) return;
+            for (int i = 0; i < _radialItems.Count; i++)
+            {
+                bool hot = (i == _radialHover);
+                _radialItems[i].Shape.Fill = hot ? _radialFillHot : _radialFillNorm;
+                _radialItems[i].Text.Foreground = hot ? _radialTextHot : _radialTextNorm;
+            }
+        }
+
+        void RunRadialItem()
+        {
+            int h = _radialHover;
+            CloseRadial();
+            if (h < 0 || _radialItems == null || h >= _radialItems.Count) return;
+            try
+            {
+                Log.Write("radial run " + _radialItems[h].Label);
+                _radialItems[h].Run();
+            }
+            catch (Exception ex) { Log.Write("radial run: " + ex.Message); }
+        }
+
+        void OnRadialDown(object sender, MouseButtonEventArgs e)
+        {
+            try
+            {
+                if (_radialOpen) { CloseRadial(); e.Handled = true; return; }
+                ShowRadialMenu();
+                e.Handled = true;
+            }
+            catch (Exception ex)
+            {
+                Log.Write("radial down: " + ex.Message);
+                CloseRadial();
+                TryOpenMenu();                    // 轮盘挂了就退回列表菜单，别让右键失灵
+            }
+        }
+
+        void OnRadialUp(object sender, MouseButtonEventArgs e)
+        {
+            if (!_radialOpen) return;
+            UpdateRadialHover();
+            if (_radialHover >= 0 && _radialMoveMax > 10) RunRadialItem();
+            else if (_radialMoveMax <= 10) { /* 只点了一下：保持展开，等左键点选 */ }
+            else CloseRadial();
+            e.Handled = true;
         }
 
         // P0-4 跟随开关变化：关闭时暂停定时器（CPU 归零）并让瞳孔回正
@@ -2180,6 +2531,15 @@ namespace DesktopPet
 
         void OnDown(object sender, MouseButtonEventArgs e)
         {
+            // 轮盘展开时左键 = 选中/取消，不能落进拖动逻辑
+            if (_radialOpen)
+            {
+                UpdateRadialHover();
+                if (_radialHover >= 0) RunRadialItem();
+                else CloseRadial();
+                e.Handled = true;
+                return;
+            }
             var dp = e.GetPosition(this);
             Log.Write("mouse down at (" + (int)dp.X + "," + (int)dp.Y + ") clickCount=" + e.ClickCount);
             if (e.ClickCount == 2)
@@ -2428,6 +2788,12 @@ namespace DesktopPet
 
         void OnMove(object sender, MouseEventArgs e)
         {
+            // 轮盘展开期间：鼠标被 Capture 到这里，只负责高亮跟随，不碰拖动状态
+            if (_radialOpen)
+            {
+                UpdateRadialHover();
+                return;
+            }
             // 松键清理：只在按键确实松开时复位（CaptureMouse 会合成一次 OnMove——
             // 若在"按键未按下"判断之外再判 !_dragging，pending 态会在按下期间被误清，单击判定全灭）
             if (e.LeftButton != MouseButtonState.Pressed)
