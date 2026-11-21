@@ -289,16 +289,20 @@ namespace DesktopPet
 
         // FIX-ORB：悬浮魔法球——一只会飘的青色光球；闲逛时豆仔去追它，追到就闪开
         bool _orbEnabled = true;                        // 右键菜单可关
-        bool _hasWalkTarget;                            // 本次行走是否锁定目标（追球时才有）
-        double _walkTargetX;                            // 目标：窗口 Left 的目标值（DIP）
+        bool _hasWalkTarget;                            // 兼容字段：追球玩法撤回后恒为 false
         Window _orbWindow;
         System.Windows.Shapes.Ellipse _orbGlow;
         System.Windows.Shapes.Ellipse _orbCore;
         double _orbX = double.NaN, _orbY = double.NaN;  // 球心屏幕坐标（DIP），NaN = 还没初始化
         double _orbTX, _orbTY;                          // 缓动目标
-        double _orbIdleT;                               // 自行漂移计时
+
         double _orbBob;                                 // 浮动相位
-        double _catchT;                                 // 闪开后的防抖
+        double _orbDY;                                  // 渲染层额外垂直偏移（浮动/贴地跳）
+        double _orbTheta;                               // 绕圈角度
+        double _playT;                                  // 下次"扑球"倒计时
+        Grid _orbBurst;                                 // 被抓空时喷出来的一圈小星点
+        ScaleTransform _orbBurstScale;
+
 
         public PetWindow()
         {
@@ -554,7 +558,7 @@ namespace DesktopPet
                 // FIX-ORB：魔法球开关（关掉就只剩普通闲逛）
                 var miOrb = new System.Windows.Controls.MenuItem
                 {
-                    Header = "魔法球（追着玩）",
+                    Header = "魔法球（小伙伴）",
                     IsCheckable = true,
                     IsChecked = _orbEnabled
                 };
@@ -1185,6 +1189,25 @@ namespace DesktopPet
                 g.Children.Add(_orbGlow);
                 g.Children.Add(_orbCore);
 
+                // 扑空时喷一圈小星点：8 颗，绕中心 42px，整体缩放 + 淡出
+                _orbBurst = new Grid { Width = 120, Height = 120, Opacity = 0.0, IsHitTestVisible = false };
+                _orbBurst.HorizontalAlignment = HorizontalAlignment.Center;
+                _orbBurst.VerticalAlignment = VerticalAlignment.Center;
+                _orbBurstScale = new ScaleTransform(1, 1);
+                _orbBurst.RenderTransformOrigin = new Point(0.5, 0.5);
+                _orbBurst.RenderTransform = _orbBurstScale;
+                for (int i = 0; i < 8; i++)
+                {
+                    double a = i * Math.PI / 4.0;
+                    var dot = new System.Windows.Shapes.Ellipse { Width = 6, Height = 6 };
+                    dot.Fill = new SolidColorBrush(Color.FromArgb(0xE6, 0xDA, 0xF6, 0xFF));
+                    dot.HorizontalAlignment = HorizontalAlignment.Left;
+                    dot.VerticalAlignment = VerticalAlignment.Top;
+                    dot.Margin = new Thickness(60 + Math.Cos(a) * 42 - 3, 60 + Math.Sin(a) * 42 - 3, 0, 0);
+                    _orbBurst.Children.Add(dot);
+                }
+                g.Children.Add(_orbBurst);
+
                 var w = new Window
                 {
                     WindowStyle = WindowStyle.None,
@@ -1218,7 +1241,17 @@ namespace DesktopPet
                 _orbY = Top + 60;
                 _orbTX = _orbX;
                 _orbTY = _orbY;
+                _orbTheta = Math.PI * 1.4;                        // 从侧后方起转，别一开机就绕到脸前
+                _playT = 10.0 + _rand.NextDouble() * 8.0;          // 第一次扑球延后，开机别立刻扑
                 ApplyOrbPos();
+
+                // 认主：Owner 只能在两个窗口都显示之后再设（否则抛"之前未显示的 Window"）。
+                // 设了之后球永远在豆仔之上——绕到后脑勺时不会被球挡住消失，看起来才像"绕圈"
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    try { _orbWindow.Owner = this; }
+                    catch (Exception ex) { Log.Write("orb owner: " + ex.Message); }
+                }));
                 Log.Write("orb on");
             }
             catch (Exception ex) { Log.Write("orb init: " + ex.Message); }
@@ -1227,11 +1260,14 @@ namespace DesktopPet
         void ApplyOrbPos()
         {
             if (_orbWindow == null) return;
-            double bob = Math.Sin(_orbBob * 1.7) * 7.0;
             _orbWindow.Left = _orbX - 60;
-            _orbWindow.Top = _orbY + bob - 60;
+            _orbWindow.Top = _orbY + _orbDY - 60;
         }
 
+        // 魔法球 = 跟着豆仔的小伙伴：
+        //   · 豆仔走路时 → 落在它身后贴地一跳一跳地跟（像大人带小孩）
+        //   · 豆仔待机时 → 沿着椭圆轨道在它身前身后绕圈
+        //   · 偶尔球绕到脸前，豆仔扑一下扑空 → 喷一圈星点 + 开心两秒
         void TickOrb(double dt)
         {
             if (_orbWindow == null) return;
@@ -1245,57 +1281,95 @@ namespace DesktopPet
 
             var area = WorkArea();
             double cx = Left + Width * 0.5;
-            double cy = Top + Height * 0.45;
+            double cy = Top + Height * 0.42;
+            double groundY = Top + Height * 0.685;      // 球底那一行，球贴在这个高度跳
 
             if (double.IsNaN(_orbX))
             {
-                _orbX = cx + 150; _orbY = Top + 60; _orbTX = _orbX; _orbTY = _orbY;
+                _orbX = cx - 120; _orbY = groundY; _orbTX = _orbX; _orbTY = _orbY;
             }
 
-            // 自己慢慢闲飘：3~7 秒换个落点，只在豆仔附近晃，绝不飘出屏幕
-            _orbIdleT -= dt;
-            if (_orbIdleT <= 0)
+            _orbBob += dt;
+            if (_playT > 0) _playT -= dt;
+
+            if (_state == State.Walk)
             {
-                _orbIdleT = 3.0 + _rand.NextDouble() * 4.0;
-                double nx = cx + (_rand.NextDouble() * 2 - 1) * 250;
-                double ny = cy - 90 + (_rand.NextDouble() * 2 - 1) * 80;
-                _orbTX = Math.Max(area.Left + 55, Math.Min(area.Right - 55, nx));
-                _orbTY = Math.Max(area.Top + 55, Math.Min(area.Bottom - 55, ny));
+                // 跟在后下方，贴地一跳一跳
+                _orbTX = cx - _dir * 105;
+                _orbTY = groundY;
+                _orbDY = -Math.Abs(Math.Sin(_orbBob * 3.4)) * 17.0;
             }
-
-            // 豆仔追到身边 → 往反方向窜开，并抬高一点
-            if (_catchT > 0) _catchT -= dt;
-            if (_catchT <= 0 && Math.Abs(_orbX - cx) < 46 && Math.Abs(_orbY - cy) < 150)
+            else
             {
-                double away = (_orbX >= cx) ? 1 : -1;
-                double nx = _orbX + away * (120 + _rand.NextDouble() * 140);
-                if (nx > area.Right - 80 || nx < area.Left + 80)      // 贴边就改窜另一侧
-                    nx = cx - away * (150 + _rand.NextDouble() * 90);
-                _orbTX = Math.Max(area.Left + 55, Math.Min(area.Right - 55, nx));
-                _orbTY = Math.Max(area.Top + 55, Math.Min(area.Bottom - 55, cy - 100 - _rand.NextDouble() * 40));
-                _catchT = 0.9;
-                if (_state == State.Walk && _hasWalkTarget) { _hasWalkTarget = false; EnterIdle(); }
-                Log.Write("orb dodge");
+                // 身前身后绕圈（椭圆：横向 128、纵向 52，慢速 0.62rad/s ≈ 10 秒一圈）
+                _orbTheta += dt * 0.52;
+                _orbTX = cx + Math.Cos(_orbTheta) * 128;
+                _orbTY = cy + Math.Sin(_orbTheta) * 52;
+                _orbDY = Math.Sin(_orbBob * 1.7) * 6.0;
+
+                // 偶尔绕到脸前时扑一下：14~24 秒一次，别太频繁
+                if (_playT <= 0 && _state == State.Idle && !_paused && Math.Cos(_orbTheta) > 0.65)
+                {
+                    _playT = 14.0 + _rand.NextDouble() * 10.0;
+                    _orbTX += 55;            // 球顺轨道再往前滑一点，扑空感更强
+                    OrbBurst();
+                    PlayPounce();
+                    Log.Write("orb play");
+                }
             }
 
-            // 缓动飞过去（约 4/s 收敛），浮动的上下位移在渲染层单独加
-            double k = Math.Min(1.0, dt * 4.0);
+            _orbTX = Math.Max(area.Left + 55, Math.Min(area.Right - 55, _orbTX));
+            _orbTY = Math.Max(area.Top + 55, Math.Min(area.Bottom - 55, _orbTY));
+
+            double k = Math.Min(1.0, dt * (_state == State.Walk ? 5.0 : 6.0));
             _orbX += (_orbTX - _orbX) * k;
             _orbY += (_orbTY - _orbY) * k;
-            _orbBob += dt;
             if (_orbGlow != null) _orbGlow.Opacity = 0.72 + 0.28 * Math.Sin(_orbBob * 2.3);
             ApplyOrbPos();
         }
 
-        // 抓不到时的反应：到了球底下就跳一下（复用现有 jump 动画）
-        void OrbCaught()
+        // 喷一圈小星点：整体放大 0.35→1.5，同时淡出
+        void OrbBurst()
+        {
+            try
+            {
+                if (_orbBurst == null) return;
+                _orbBurst.BeginAnimation(OpacityProperty, null);
+                _orbBurstScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+                _orbBurstScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+                _orbBurst.Opacity = 1.0;
+                _orbBurstScale.ScaleX = 0.35;
+                _orbBurstScale.ScaleY = 0.35;
+                var fa = new DoubleAnimation(1.0, 0.0, TimeSpan.FromMilliseconds(560));
+                var sa = new DoubleAnimation(0.35, 1.55, TimeSpan.FromMilliseconds(560));
+                _orbBurst.BeginAnimation(OpacityProperty, fa);
+                _orbBurstScale.BeginAnimation(ScaleTransform.ScaleXProperty, sa);
+                _orbBurstScale.BeginAnimation(ScaleTransform.ScaleYProperty, sa);
+            }
+            catch (Exception ex) { Log.Write("orb burst: " + ex.Message); }
+        }
+
+        // 扑空：跳一下 + 开心两秒半（复用现有 jump 动画和情绪系统）
+        void PlayPounce()
         {
             try
             {
                 if (!_orbEnabled) return;
                 ApiAction("jump");
+                SetMood("happy");
+                var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(2600) };
+                t.Tick += delegate
+                {
+                    try
+                    {
+                        t.Stop();
+                        if (_mood == "happy") SetMood("neutral");
+                    }
+                    catch (Exception ex) { Log.Write("orb mood back: " + ex.Message); }
+                };
+                t.Start();
             }
-            catch (Exception ex) { Log.Write("orb caught: " + ex.Message); }
+            catch (Exception ex) { Log.Write("orb pounce: " + ex.Message); }
         }
 
         // 宠物中心点所在屏幕的工作区（换算为 DIP 坐标）
@@ -1948,19 +2022,6 @@ namespace DesktopPet
                     SetEyes(1.0);
                     var area = WorkArea();
                     double nx = Left + _dir * WalkSpeed * dt;
-                    bool reachedOrb = false;
-                    if (_hasWalkTarget)
-                    {
-                        double dx = _walkTargetX - Left;
-                        double step = WalkSpeed * dt;
-                        if (Math.Abs(dx) <= step || Math.Abs(dx) <= 3.0)
-                        {
-                            nx = _walkTargetX;
-                            _hasWalkTarget = false;
-                            reachedOrb = true;
-                        }
-                        else nx = Left + Math.Sign(dx) * step;
-                    }
                     if (nx < area.Left || nx + Width > area.Right || _stateTimer <= 0)
                     {
                         _hasWalkTarget = false;
@@ -1969,8 +2030,6 @@ namespace DesktopPet
                     else
                     {
                         Left = nx;
-                        // FIX-ORB：走到球底下 → 起跳去抓（球会同时窜开，抓不到是常态）
-                        if (reachedOrb) { OrbCaught(); EnterIdle(); }
                     }
                 }
                 else
@@ -2048,22 +2107,7 @@ namespace DesktopPet
             _stateTimer = WalkMin + _rand.NextDouble() * (WalkMax - WalkMin);
             _dir = _rand.Next(2) == 0 ? 1.0 : -1.0;
             AnimateYaw(_dir > 0 ? WalkYawDeg : -WalkYawDeg);
-
-            // FIX-ORB：魔法球开着就优先去追它——目标取球心正下方，走不到才退回随机散步
-            _hasWalkTarget = false;
-            if (_orbEnabled && _orbWindow != null && !double.IsNaN(_orbX) &&
-                _orbWindow.Visibility == Visibility.Visible)
-            {
-                var area = WorkArea();
-                double tx = Math.Max(area.Left, Math.Min(area.Right - Width, _orbX - Width * 0.5));
-                if (Math.Abs(tx - Left) > 10)
-                {
-                    _hasWalkTarget = true;
-                    _walkTargetX = tx;
-                    _dir = tx > Left ? 1.0 : -1.0;
-                    AnimateYaw(_dir > 0 ? WalkYawDeg : -WalkYawDeg);
-                }
-            }
+            _hasWalkTarget = false;      // 现在魔法球是"跟着走"，不再有追球目标
         }
 
         // FIX-TURN P0-2：一律走最短路径——delta 折进 (-180,180]，起点取与 target 等价且离当前最近的角。
