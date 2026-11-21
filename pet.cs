@@ -698,20 +698,7 @@ namespace DesktopPet
             var baseDonut = new System.Windows.Shapes.Path { Data = baseGeo, Fill = new SolidColorBrush(Color.FromArgb(0x8A, 0x18, 0x36, 0x5E)) };
             _radialCanvas.Children.Add(baseDonut);
 
-            // 中间不再垫底：留出圆洞，让豆仔的脸露在轮盘中央
-
-            var cxText = new TextBlock
-            {
-                Text = "取消",
-                FontSize = 11,
-                Foreground = new SolidColorBrush(Color.FromArgb(0x9E, 0xEC, 0xF7, 0xFF)),
-                Width = 56,
-                TextAlignment = TextAlignment.Center,
-                FontFamily = new FontFamily("Microsoft YaHei UI")
-            };
-            Canvas.SetLeft(cxText, cx - 28);
-            Canvas.SetTop(cxText, cy - 8);
-            _radialCanvas.Children.Add(cxText);
+            // 中间不再垫底、也不再写"取消"：圆洞里只留豆仔的脸（点洞中心 = 取消）
 
             _radialItems = new List<RadialItem>();
             AddRadialItem(0, "说话", delegate { ShowSpeakDialog(); }, null, null);
