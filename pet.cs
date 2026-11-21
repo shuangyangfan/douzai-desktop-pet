@@ -316,6 +316,8 @@ namespace DesktopPet
             Height = 320;
             Title = "豆仔 · 3D Desktop Pet";
 
+            LoadSettings();   // 先把上次选的轮盘样式读回来，再建界面
+
             var area = SystemParameters.WorkArea;
             Left = area.Right - Width - 40;
             Top = area.Bottom - Height;
@@ -1134,7 +1136,48 @@ namespace DesktopPet
         {
             _radialStyle = (_radialStyle + 1) % StyleCount;
             ApplyRadialStyle();
+            SaveSettings();
             Log.Write("radial style=" + _radialStyle + " " + StyleNames[_radialStyle]);
+        }
+
+        // 配置只存轮盘样式这一项，换成 key=value 续着写就行
+        static readonly string ConfigPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "DouzaiDesktopPet", "config.ini");
+
+        void LoadSettings()
+        {
+            try
+            {
+                if (!File.Exists(ConfigPath)) return;
+                foreach (var raw in File.ReadAllLines(ConfigPath))
+                {
+                    var line = raw.Trim();
+                    if (line.StartsWith("style="))
+                    {
+                        int v;
+                        if (int.TryParse(line.Substring(6).Trim(), out v) && v >= 0 && v < StyleCount)
+                            _radialStyle = v;
+                    }
+                }
+                Log.Write("config load style=" + _radialStyle + " " + StyleNames[_radialStyle]);
+            }
+            catch (Exception ex) { Log.Write("config load: " + ex.Message); }
+        }
+
+        void SaveSettings()
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(ConfigPath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllLines(ConfigPath, new string[]
+                {
+                    "# 豆仔配置：删掉这个文件就回到默认（金色法阵）",
+                    "style=" + _radialStyle
+                }, Encoding.UTF8);
+            }
+            catch (Exception ex) { Log.Write("config save: " + ex.Message); }
         }
 
         void ToggleDoze()
