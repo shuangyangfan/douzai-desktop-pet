@@ -2412,6 +2412,7 @@ namespace DesktopPet
             new ChatTheme { Name = "暖沙", Win1 = 0x1C1710, Win2 = 0x2A2114, Head1 = 0x2A2114, Head2 = 0x20180E, Line = 0x4A3A24, Panel = 0x16110A, InputBg = 0x231B10, InputLine = 0x4A3A24, Acc1 = 0xE0A050, Acc2 = 0xF0C060, Text = 0xFBF2E2, Muted = 0xB0A088, PillBg = 0xFFE8C0, PetBubble = 0xFFF8EC, PetText = 0x30240F, UserText = 0xFFFFFF, AccText = 0xFFFFFF },
             new ChatTheme { Name = "墨黑", Win1 = 0x14161A, Win2 = 0x1E2126, Head1 = 0x22252B, Head2 = 0x191B20, Line = 0x33373F, Panel = 0x101216, InputBg = 0x1A1D23, InputLine = 0x3A3F48, Acc1 = 0x6E8FD8, Acc2 = 0x9AA8F0, Text = 0xF0F2F6, Muted = 0x949AA6, PillBg = 0xD8DCE6, PetBubble = 0xF2F4F8, PetText = 0x1C1F26, UserText = 0xFFFFFF, AccText = 0xFFFFFF },
             new ChatTheme { Name = "乳白", Win1 = 0xEDE4D2, Win2 = 0xF8F3E8, Head1 = 0xFBF6EA, Head2 = 0xF0E8D8, Line = 0xDCD0B8, Panel = 0xFFFCF4, InputBg = 0xFFFDF8, InputLine = 0xDCD0B8, Acc1 = 0xC08B52, Acc2 = 0xD7A469, Text = 0x3A3026, Muted = 0x8A7A66, PillBg = 0x6B5A44, PetBubble = 0xFFFFFF, PetText = 0x2E261C, UserText = 0xFFFBF3, AccText = 0xFFFBF3 },
+            new ChatTheme { Name = "纯白", Win1 = 0xFFFFFF, Win2 = 0xFAFBFD, Head1 = 0xFFFFFF, Head2 = 0xF4F6FA, Line = 0xE1E6EF, Panel = 0xFFFFFF, InputBg = 0xFFFFFF, InputLine = 0xE1E6EF, Acc1 = 0x4E7FE0, Acc2 = 0x7E8FF2, Text = 0x1E2638, Muted = 0x7C879C, PillBg = 0x1E2638, PetBubble = 0xEEF3FB, PetText = 0x1E2638, UserText = 0xFFFFFF, AccText = 0xFFFFFF },
         };
 
         static Brush ChatGradV(int a1, int c1, int a2, int c2)
@@ -2719,7 +2720,7 @@ namespace DesktopPet
                     _chatInput.Foreground = new SolidColorBrush(ThemeColor(th.Text));
                     _chatInput.CaretBrush = new SolidColorBrush(ThemeColor(th.Text));
                     if (_chatInputWrap != null)
-                        _chatInputWrap.BorderBrush = new SolidColorBrush(ThemeColor(_chatInput.IsFocused ? th.Acc1 : th.InputLine));
+                        _chatInputWrap.BorderBrush = new SolidColorBrush(_chatInput.IsFocused ? ThemeColorA(0x88, th.Acc1) : ThemeColor(th.InputLine));
                 }
                 if (_chatPlaceholder != null) _chatPlaceholder.Foreground = new SolidColorBrush(ThemeColor(th.Muted));
                 if (_chatShell != null) _chatShell.BorderBrush = new SolidColorBrush(Color.FromArgb(0x55, 0, 0, 0));
@@ -3423,13 +3424,13 @@ namespace DesktopPet
                     Background = new SolidColorBrush(Col(0xFF, 0x1A, 0x23, 0x40)),
                     BorderBrush = new SolidColorBrush(Col(0xFF, 0x33, 0x40, 0x6B)),
                     BorderThickness = new Thickness(1.4),
-                    Padding = new Thickness(10, 2, 6, 2)
+                    Padding = new Thickness(10, 2, 10, 2)
                 };
                 inputOuter.Children.Add(_chatInputWrap);
                 var inputDock = new DockPanel { LastChildFill = true };
                 _chatSend = MakePillButton("发送", delegate { SendChat(); }, true);
                 _chatSendText = _chatSend.Child as TextBlock;
-                _chatSend.Margin = new Thickness(8, 0, 0, 0);
+                _chatSend.Margin = new Thickness(10, 0, 0, 0);
                 DockPanel.SetDock(_chatSend, Dock.Right);
                 inputDock.Children.Add(_chatSend);
                 var inputGrid = new Grid();
@@ -3467,7 +3468,7 @@ namespace DesktopPet
                 _chatInput.GotFocus += delegate
                 {
                     if (_chatInputWrap != null)
-                        _chatInputWrap.BorderBrush = new SolidColorBrush(ThemeColor(ChatThemes[_chatTheme].Acc1));
+                        _chatInputWrap.BorderBrush = new SolidColorBrush(ThemeColorA(0x88, ChatThemes[_chatTheme].Acc1));
                 };
                 _chatInput.LostFocus += delegate
                 {
