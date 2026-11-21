@@ -1,0 +1,699 @@
+openapi: 3.0.3
+info:
+  title: 豆仔 · Douzai Desktop Pet API
+  version: 1.1.0
+  description: |
+    桌面宠物「豆仔」的本地 HTTP 接口。单文件 WPF 3D 桌宠，监听 127.0.0.1，
+    默认端口 8787，被占用时自动 +1 递增（8788、8789）。
+
+    统一响应包体：`{"code":0,"msg":"ok","data":{...}}`。
+    - 成功：HTTP 200 + `code:0`
+    - 参数缺失：HTTP 400 + `code:400` + `msg:"bad request"`
+    - 路径不存在：HTTP 404 + `code:404` + `msg:"not found"`
+    - 方法不对：HTTP 405 + `code:405` + `msg:"method not allowed"`
+    - `/pet/mood` 的特殊情况：非法值返回 HTTP 200 但 `code:1` + `msg:"unknown mood"`（不崩）
+
+    坐标说明：`/pet/move` 的 x/y 是 WPF DIP（125% 缩放下物理像素 × 0.8）。
+    `/status` 返回的 x/y 是窗口左上角，单位同样是 DIP。
+
+    同一端口复用 MCP：请求体含 `"jsonrpc"` 时走 JSON-RPC 2.0（protocolVersion 2024-11-05，
+    serverInfo `desktop-pet` v1.1.0），工具见文末 `x-mcp-tools`。
+  contact:
+    name: Douzai Desktop Pet
+    url: https://github.com/shuangyangfan/douzai-desktop-pet
+  license:
+    name: MIT
+    url: https://github.com/shuangyangfan/douzai-desktop-pet/blob/main/LICENSE
+
+servers:
+  - url: http://127.0.0.1:8787
+    description: 默认端口；如被占用会递增，先用 GET /pet/port 探测实际端口
+
+tags:
+  - name: 基础
+    description: 端口与状态查询
+  - name: 交互
+    description: 说话、显示隐藏、移动、闲逛开关、转身
+  - name: 动作
+    description: 一次性动画
+  - name: 情绪与姿态
+    description: 情绪状态机与连续姿态注入
+  - name: 兼容旧接口
+    description: 早期版本留下的 /jump /walk /idle
+
+paths:
+  /:
+    get:
+      tags: [基础]
+      summary: 端点清单
+      operationId: listEndpoints
+      responses:
+        '200':
+          description: 返回支持的端点列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/EndpointsData'
+
+  /pet/port:
+    get:
+      tags: [基础]
+      summary: 查询实际监听端口
+      operationId: getPetPort
+      responses:
+        '200':
+          description: 端口号
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          port:
+                            type: integer
+                            example: 8787
+
+  /status:
+    get:
+      tags: [基础]
+      summary: 查询桌宠状态
+      description: 任何 API 调用都会唤醒正在打盹的豆仔，所以轮询 /status 也会让它「醒啦」。
+      operationId: getStatus
+      responses:
+        '200':
+          description: 状态快照
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/StatusData'
+
+  /pet/chat:
+    post:
+      tags: [交互]
+      summary: 头顶冒气泡说话（约 3 秒后消失）
+      operationId: petChat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: 已受理
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /pet/visible:
+    post:
+      tags: [交互]
+      summary: 显示或隐藏桌宠
+      operationId: petVisible
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VisibleRequest'
+      responses:
+        '200':
+          description: 当前可见状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          show:
+                            type: boolean
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /pet/move:
+    post:
+      tags: [交互]
+      summary: 平滑移动到指定屏幕坐标（自动钳制在屏幕内）
+      operationId: petMove
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoveRequest'
+      responses:
+        '200':
+          description: 已受理（返回的是请求坐标，不是落点）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/MoveRequest'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /pet/pause:
+    post:
+      tags: [交互]
+      summary: 暂停 / 恢复自动闲逛
+      operationId: petPause
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PauseRequest'
+      responses:
+        '200':
+          description: 当前暂停状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          pause:
+                            type: boolean
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /pet/face:
+    post:
+      tags: [交互]
+      summary: 立刻转身面向镜头（yaw 归零），随后 1.5 秒内不闲逛
+      operationId: petFace
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200':
+          description: 已转身
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          face:
+                            type: string
+                            enum: [front]
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /pet/action:
+    post:
+      tags: [动作]
+      summary: 触发一次性动作动画
+      operationId: petAction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActionRequest'
+      responses:
+        '200':
+          description: 动作已执行
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          action:
+                            $ref: '#/components/schemas/ActionId'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /pet/mood:
+    post:
+      tags: [情绪与姿态]
+      summary: 设置情绪（影响眼睛开合、腮红、浮动与呼吸）
+      description: |
+        非法值不返回 400，而是 HTTP 200 + `{"code":1,"msg":"unknown mood","data":{}}`，
+        且不影响进程存活。`doze` 会立刻冒「豆仔困啦」气泡，7 秒后才开始 Zzz。
+      operationId: petMood
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoodRequest'
+      responses:
+        '200':
+          description: 切换成功，或 mood 非法（code=1）
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - allOf:
+                      - $ref: '#/components/schemas/Envelope'
+                      - type: object
+                        properties:
+                          data:
+                            type: object
+                            properties:
+                              mood:
+                                $ref: '#/components/schemas/MoodId'
+                  - $ref: '#/components/schemas/UnknownMood'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /pet/pose:
+    post:
+      tags: [情绪与姿态]
+      summary: 连续姿态注入（比 mood 更精细，未传的项不改）
+      description: |
+        用来做「看这边」「歪头」「睁大眼睛」这类细节。hold 秒后自动还原；
+        传 `clear:true` 立刻放开接管。yaw 超过 ±24° 五官会贴到球轮廓上。
+      operationId: petPose
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PoseRequest'
+      responses:
+        '200':
+          description: 已注入
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          pose:
+                            type: string
+                            enum: [ok]
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /jump:
+    post:
+      tags: [兼容旧接口]
+      summary: 跳一下（等价 /pet/action {action:jump}）
+      operationId: legacyJump
+      deprecated: true
+      responses:
+        '200':
+          description: 已执行
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          action:
+                            type: string
+                            enum: [jump]
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /walk:
+    post:
+      tags: [兼容旧接口]
+      summary: 左右走一段时间（方向与秒数走 query）
+      operationId: legacyWalk
+      deprecated: true
+      parameters:
+        - name: dir
+          in: query
+          required: false
+          description: 方向，>=0 向右，<0 向左
+          schema:
+            type: number
+            default: 1
+            example: 1
+        - name: seconds
+          in: query
+          required: false
+          description: 持续秒数，最小按 0.5 兜底
+          schema:
+            type: number
+            default: 5
+            example: 5
+      responses:
+        '200':
+          description: 已开始行走
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          action:
+                            type: string
+                            enum: [walk]
+                          dir:
+                            type: integer
+                            enum: [-1, 1]
+                          seconds:
+                            type: number
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /idle:
+    post:
+      tags: [兼容旧接口]
+      summary: 回到待机（等价 /pet/action {action:idle}）
+      operationId: legacyIdle
+      deprecated: true
+      responses:
+        '200':
+          description: 已待机
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          action:
+                            type: string
+                            enum: [idle]
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+components:
+  responses:
+    BadRequest:
+      description: 参数缺失或非法
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 400
+            msg: bad request
+            data: {}
+    MethodNotAllowed:
+      description: 方法不对（这些接口只收 POST）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 405
+            msg: method not allowed
+            data: {}
+
+  schemas:
+    Envelope:
+      type: object
+      required: [code, msg, data]
+      properties:
+        code:
+          type: integer
+          description: 0 = 成功
+          example: 0
+        msg:
+          type: string
+          example: ok
+        data:
+          type: object
+          additionalProperties: true
+
+    ErrorEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+      type: object
+      properties:
+        code:
+          type: integer
+          example: 400
+        msg:
+          type: string
+          example: bad request
+
+    UnknownMood:
+      type: object
+      properties:
+        code:
+          type: integer
+          enum: [1]
+        msg:
+          type: string
+          enum: [unknown mood]
+        data:
+          type: object
+          additionalProperties: true
+
+    EndpointsData:
+      type: object
+      properties:
+        endpoints:
+          type: array
+          items:
+            type: string
+          example:
+            - GET /pet/port
+            - GET /status
+            - POST /pet/chat
+            - POST /pet/action
+            - POST /pet/visible
+            - POST /pet/move
+            - POST /pet/mood
+            - POST /pet/pose
+            - POST /pet/pause
+            - POST /pet/face
+            - POST /jump
+            - POST /walk?dir=1&seconds=5
+            - POST /idle
+
+    StatusData:
+      type: object
+      properties:
+        state:
+          type: string
+          enum: [idle, walk, doze, happy, shy, curious, sleepy]
+          description: 当前动作状态
+        x:
+          type: integer
+          description: 窗口左上角 X（DIP）
+        y:
+          type: integer
+          description: 窗口左上角 Y（DIP）
+        port:
+          type: integer
+        visible:
+          type: boolean
+        mood:
+          $ref: '#/components/schemas/MoodId'
+        pose:
+          type: boolean
+          description: 是否正处于姿态接管中（hold 未到期）
+        floor:
+          type: number
+          format: float
+          description: 地面视差系数，3 位小数
+        bg:
+          type: number
+          format: float
+          description: 背景亮度，2 位小数
+
+    ActionId:
+      type: string
+      description: |
+        idle=回到待机，bounce=弹一下，jump=bounce 的别名，shake=摇头晃脑，
+        turn=原地转一圈，blush=害羞。服务端匹配前会 ToLowerInvariant，大小写不敏感。
+      enum: [idle, bounce, jump, shake, turn, blush]
+
+    MoodId:
+      type: string
+      description: |
+        neutral=平常，happy=开心，shy=害羞，curious=好奇，sleepy=犯困，doze=打盹。
+      enum: [neutral, happy, shy, curious, sleepy, doze]
+
+    ChatRequest:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          description: 气泡显示的文字，不能为空
+          example: 豆仔来啦～
+
+    ActionRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          $ref: '#/components/schemas/ActionId'
+
+    MoodRequest:
+      type: object
+      required: [mood]
+      properties:
+        mood:
+          $ref: '#/components/schemas/MoodId'
+
+    VisibleRequest:
+      type: object
+      properties:
+        show:
+          type: boolean
+          default: true
+          description: true 显示，false 隐藏
+
+    MoveRequest:
+      type: object
+      required: [x, y]
+      properties:
+        x:
+          type: number
+          description: 目标 X（DIP），越界会被钳制在屏幕内
+          example: 1176
+        y:
+          type: number
+          description: 目标 Y（DIP），越界会被钳制在屏幕内
+          example: 504
+
+    PauseRequest:
+      type: object
+      properties:
+        on:
+          type: boolean
+          default: false
+          description: true=暂停闲逛，false=恢复
+
+    PoseRequest:
+      type: object
+      properties:
+        eye:
+          type: number
+          minimum: 0.05
+          maximum: 1.4
+          description: 眼睛开合，1=正常
+        blush:
+          type: number
+          minimum: 0
+          maximum: 2.5
+          description: 腮红强度，1=情绪默认
+        yaw:
+          type: number
+          minimum: -24
+          maximum: 24
+          description: 朝向角，0=正面；超过 ±24° 五官会贴到球轮廓上
+        gazeX:
+          type: number
+          minimum: -1
+          maximum: 1
+          description: 瞳孔左右
+        gazeY:
+          type: number
+          minimum: -1
+          maximum: 1
+          description: 瞳孔上下
+        breathAmp:
+          type: number
+          minimum: 0
+          maximum: 0.2
+          description: 呼吸幅度
+        breathFreq:
+          type: number
+          minimum: 0.2
+          maximum: 6
+          description: 呼吸频率
+        hold:
+          type: number
+          default: 6
+          maximum: 60
+          description: 接管秒数，默认 6，上限 60
+        clear:
+          type: boolean
+          default: false
+          description: true=立刻放开姿态接管
+
+x-mcp-tools:
+  transport: 同一端口，POST body 含 "jsonrpc" 即走 JSON-RPC 2.0
+  protocolVersion: '2024-11-05'
+  serverInfo:
+    name: desktop-pet
+    version: 1.1.0
+  methods: [initialize, ping, tools/list, tools/call]
+  tools:
+    pet_chat:
+      params: {text: string}
+    pet_action:
+      params:
+        action:
+          enum: [idle, bounce, shake, turn, blush]
+          note: 源码 MCP schema 漏了 jump（HTTP 那条接受 jump），建议补上
+    pet_visible:
+      params: {show: boolean}
+    pet_move:
+      params: {x: number, y: number}
+    pet_mood:
+      params:
+        mood:
+          enum: [happy, shy, curious, sleepy, doze, neutral]
+    pet_pause:
+      params: {on: boolean}
+    pet_face:
+      params: {}
+    pet_pose:
+      params: {eye: number, blush: number, yaw: number, gazeX: number, gazeY: number, breathAmp: number, breathFreq: number, hold: number, clear: boolean}
+    pet_status:
+      params: {}
