@@ -647,9 +647,9 @@ namespace DesktopPet
             public TextBlock Tick;
         }
 
-        const double RadialSize = 344;
-        const double RadialOuter = 152;
-        const double RadialInner = 58;
+        const double RadialSize = 266;
+        const double RadialOuter = 122;
+        const double RadialInner = 74;
         const int RadialCount = 12;
 
         System.Windows.Controls.Primitives.Popup _radial;
@@ -665,9 +665,9 @@ namespace DesktopPet
 
         void BuildRadial()
         {
-            _radialFillNorm = new SolidColorBrush(Color.FromArgb(0xF2, 0x12, 0x1C, 0x2E));
-            _radialFillHot = new SolidColorBrush(Color.FromArgb(0xFC, 0x3C, 0x8C, 0xD2));
-            _radialTextNorm = new SolidColorBrush(Color.FromArgb(0xFF, 0xDA, 0xEB, 0xFF));
+            _radialFillNorm = new SolidColorBrush(Color.FromArgb(0xB4, 0x2C, 0x5F, 0x9B));
+            _radialFillHot = new SolidColorBrush(Color.FromArgb(0xE8, 0x77, 0xCB, 0xFF));
+            _radialTextNorm = new SolidColorBrush(Color.FromArgb(0xFF, 0xE8, 0xF5, 0xFF));
             _radialTextHot = Brushes.White;
 
             _radialCanvas = new Canvas { Width = RadialSize, Height = RadialSize, IsHitTestVisible = false, Background = Brushes.Transparent };
@@ -677,9 +677,9 @@ namespace DesktopPet
             {
                 Width = (RadialOuter + 4) * 2,
                 Height = (RadialOuter + 4) * 2,
-                Stroke = new SolidColorBrush(Color.FromArgb(0x55, 0x9C, 0xD2, 0xFF)),
-                StrokeThickness = 1.2,
-                Fill = new SolidColorBrush(Color.FromArgb(0x2A, 0x08, 0x10, 0x1C))
+                Stroke = new SolidColorBrush(Color.FromArgb(0x8A, 0xD8, 0xF4, 0xFF)),
+                StrokeThickness = 1.4,
+                Fill = null
             };
             Canvas.SetLeft(ring, cx - RadialOuter - 4);
             Canvas.SetTop(ring, cy - RadialOuter - 4);
@@ -695,32 +695,22 @@ namespace DesktopPet
             fIn.Segments.Add(new ArcSegment { Point = new Point(cx - RadialInner, cy), Size = new Size(RadialInner, RadialInner), SweepDirection = SweepDirection.Counterclockwise });
             baseGeo.Figures.Add(fOut);
             baseGeo.Figures.Add(fIn);
-            var baseDonut = new System.Windows.Shapes.Path { Data = baseGeo, Fill = new SolidColorBrush(Color.FromArgb(0xE8, 0x0A, 0x12, 0x20)) };
+            var baseDonut = new System.Windows.Shapes.Path { Data = baseGeo, Fill = new SolidColorBrush(Color.FromArgb(0x8A, 0x18, 0x36, 0x5E)) };
             _radialCanvas.Children.Add(baseDonut);
 
-            var dot = new System.Windows.Shapes.Ellipse
-            {
-                Width = RadialInner * 2,
-                Height = RadialInner * 2,
-                Fill = new SolidColorBrush(Color.FromArgb(0xEC, 0x0A, 0x12, 0x20)),
-                Stroke = new SolidColorBrush(Color.FromArgb(0x60, 0x8F, 0xC8, 0xFF)),
-                StrokeThickness = 1
-            };
-            Canvas.SetLeft(dot, cx - RadialInner);
-            Canvas.SetTop(dot, cy - RadialInner);
-            _radialCanvas.Children.Add(dot);
+            // 中间不再垫底：留出圆洞，让豆仔的脸露在轮盘中央
 
             var cxText = new TextBlock
             {
                 Text = "取消",
-                FontSize = 12,
-                Foreground = _radialTextNorm,
-                Width = 64,
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromArgb(0x9E, 0xEC, 0xF7, 0xFF)),
+                Width = 56,
                 TextAlignment = TextAlignment.Center,
                 FontFamily = new FontFamily("Microsoft YaHei UI")
             };
-            Canvas.SetLeft(cxText, cx - 32);
-            Canvas.SetTop(cxText, cy - 9);
+            Canvas.SetLeft(cxText, cx - 28);
+            Canvas.SetTop(cxText, cy - 8);
             _radialCanvas.Children.Add(cxText);
 
             _radialItems = new List<RadialItem>();
@@ -753,7 +743,7 @@ namespace DesktopPet
             double cx = RadialSize / 2.0, cy = RadialSize / 2.0;
             double mid = -90.0 + index * (360.0 / RadialCount);
             double half = (360.0 / RadialCount) / 2.0;
-            double gap = 1.6;   // 扇区之间留一点缝，视觉上更清楚
+            double gap = 0.9;   // 扇区之间留一点缝，视觉上更清楚
             double a0 = (mid - half + gap) * Math.PI / 180.0;
             double a1 = (mid + half - gap) * Math.PI / 180.0;
 
