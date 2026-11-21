@@ -521,7 +521,7 @@ namespace DesktopPet
                 var menu = new ContextMenu();
 
                 var miSpeak = new System.Windows.Controls.MenuItem { Header = "说句话…" };
-                miSpeak.Click += delegate { ShowSpeakDialog(); };
+                miSpeak.Click += delegate { ShowChatWindow(); };
                 menu.Items.Add(miSpeak);
 
                 var miAct = new System.Windows.Controls.MenuItem { Header = "动作" };
@@ -813,7 +813,7 @@ namespace DesktopPet
             // 中间不再垫底、也不再写"取消"：圆洞里只留豆仔的脸（点洞中心 = 取消）
 
             _radialItems = new List<RadialItem>();
-            AddRadialItem(0, "说话", delegate { ShowSpeakDialog(); }, null, null);
+            AddRadialItem(0, "说话", delegate { ShowChatWindow(); }, null, null);
             AddRadialItem(1, "弹跳", delegate { ApiAction("bounce"); }, null, null);
             AddRadialItem(2, "摇头", delegate { ApiAction("shake"); }, null, null);
             AddRadialItem(3, "转圈", delegate { ApiAction("turn"); }, null, null);
@@ -1889,7 +1889,12 @@ namespace DesktopPet
                         if (int.TryParse(line.Substring(6).Trim(), out v) && v >= 0 && v < StyleCount)
                             _radialStyle = v;
                     }
+                    else if (line.StartsWith("ai_url=")) _aiUrl = line.Substring(7).Trim();
+                    else if (line.StartsWith("ai_key=")) _aiKey = line.Substring(7).Trim();
+                    else if (line.StartsWith("ai_model=")) _aiModel = line.Substring(9).Trim();
+                    else if (line.StartsWith("ai_prompt=")) _aiPrompt = line.Substring(10).Trim();
                 }
+                Log.Write("config load ai=" + (IsAiConfigured() ? (_aiModel + " @ " + _aiUrl) : "(not configured)"));
                 Log.Write("config load style=" + _radialStyle + " " + StyleNames[_radialStyle]);
             }
             catch (Exception ex) { Log.Write("config load: " + ex.Message); }
@@ -1904,7 +1909,11 @@ namespace DesktopPet
                 File.WriteAllLines(ConfigPath, new string[]
                 {
                     "# 豆仔配置：删掉这个文件就回到默认（星体轨道）",
-                    "style=" + _radialStyle
+                    "style=" + _radialStyle,
+                    "ai_url=" + (_aiUrl ?? ""),
+                    "ai_key=" + (_aiKey ?? ""),
+                    "ai_model=" + (_aiModel ?? ""),
+                    "ai_prompt=" + ((_aiPrompt ?? "").Replace("\r", " ").Replace("\n", " "))
                 }, Encoding.UTF8);
             }
             catch (Exception ex) { Log.Write("config save: " + ex.Message); }
@@ -2335,48 +2344,483 @@ namespace DesktopPet
             catch (Exception ex) { Log.Write("stop talking: " + ex.Message); }
         }
 
-        void ShowSpeakDialog()
+        // ================= AI 聊天（OpenAI 兼容接口）=================
+        // 右键菜单「说话」→ 打开聊天窗：消息发到配置的模型接口，回复显示在窗口里，
+        // 同时让豆仔用说话气泡念出前 60 个字。接口地址 / Key / 模型 / 人设都在
+        // 「设置」面板里填，存在 %APPDATA%\DouzaiDesktopPet\config.ini（本机明文）。
+        // 没配置接口时会自动退回原来的「让豆仔说话」模式，功能不会坏。
+
+        const string DefaultAiPrompt = "你是桌面宠物「豆仔」，一只圆滚滚的蓝色小球。说话简短、可爱、口语化，多用语气词；回答控制在 80 字以内，不要用 Markdown。";
+        string _aiUrl = "", _aiKey = "", _aiModel = "", _aiPrompt = "";
+        Window _chatWin;
+        StackPanel _chatList;
+        ScrollViewer _chatScroll;
+        TextBox _chatInput;
+        Button _chatSend;
+        TextBlock _chatHint;
+        bool _chatBusy;
+        readonly List<string[]> _chatHistory = new List<string[]>();
+
+        static string Shorten(string s, int max)
+        {
+            if (s == null) return "";
+            s = s.Replace("\r", " ").Replace("\n", " ").Trim();
+            if (s.Length <= max) return s;
+            return s.Substring(0, max) + "…";
+        }
+
+        static string JsonStr(string s)
+        {
+            if (s == null) s = "";
+            var sb = new StringBuilder("\"");
+            foreach (char c in s)
+            {
+                switch (c)
+                {
+                    case '"': sb.Append("\\\""); break;
+                    case '\\': sb.Append("\\\\"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default:
+                        if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("x4"));
+                        else sb.Append(c);
+                        break;
+                }
+            }
+            sb.Append('"');
+            return sb.ToString();
+        }
+
+        // 从响应 JSON 里抠出第一个指定字段的字符串值（够用就行，不引第三方 JSON 库）
+        static string ExtractJsonField(string json, string field)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            string pat = "\"" + field + "\"";
+            int i = json.IndexOf(pat, StringComparison.Ordinal);
+            if (i < 0) return null;
+            i += pat.Length;
+            while (i < json.Length && (json[i] == ' ' || json[i] == '\t' || json[i] == '\r' || json[i] == '\n')) i++;
+            if (i >= json.Length || json[i] != ':') return null;
+            i++;
+            while (i < json.Length && (json[i] == ' ' || json[i] == '\t' || json[i] == '\r' || json[i] == '\n')) i++;
+            if (i >= json.Length) return null;
+            if (json[i] == '"')
+            {
+                i++;
+                var sb = new StringBuilder();
+                while (i < json.Length)
+                {
+                    char c = json[i++];
+                    if (c == '"') break;
+                    if (c == '\\' && i < json.Length)
+                    {
+                        char esc = json[i++];
+                        switch (esc)
+                        {
+                            case '"': sb.Append('"'); break;
+                            case '\\': sb.Append('\\'); break;
+                            case '/': sb.Append('/'); break;
+                            case 'n': sb.Append('\n'); break;
+                            case 'r': sb.Append('\r'); break;
+                            case 't': sb.Append('\t'); break;
+                            case 'b': sb.Append('\b'); break;
+                            case 'f': sb.Append('\f'); break;
+                            case 'u':
+                                if (i + 4 <= json.Length)
+                                {
+                                    int code;
+                                    if (int.TryParse(json.Substring(i, 4), System.Globalization.NumberStyles.HexNumber, null, out code))
+                                    {
+                                        sb.Append((char)code);
+                                        i += 4;
+                                    }
+                                }
+                                break;
+                            default: sb.Append(esc); break;
+                        }
+                    }
+                    else sb.Append(c);
+                }
+                return sb.ToString();
+            }
+            int start = i;
+            while (i < json.Length && json[i] != ',' && json[i] != '}' && json[i] != ']') i++;
+            return json.Substring(start, i - start).Trim();
+        }
+
+        static string NormalizeChatUrl(string url)
+        {
+            url = (url ?? "").Trim();
+            if (url.Length == 0) return url;
+            url = url.TrimEnd('/');
+            if (url.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase)) return url;
+            return url + "/chat/completions";
+        }
+
+        // 后台线程里跑：POST /chat/completions，返回助手正文
+        string CallAi(List<string[]> msgs, string url, string key, string model, string prompt)
+        {
+            var sb = new StringBuilder();
+            sb.Append("{\"model\":").Append(JsonStr(model)).Append(",\"messages\":[");
+            bool first = true;
+            if (!string.IsNullOrEmpty(prompt))
+            {
+                sb.Append("{\"role\":\"system\",\"content\":").Append(JsonStr(prompt)).Append('}');
+                first = false;
+            }
+            for (int i = 0; i < msgs.Count; i++)
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append("{\"role\":").Append(JsonStr(msgs[i][0])).Append(",\"content\":").Append(JsonStr(msgs[i][1])).Append('}');
+            }
+            sb.Append("],\"temperature\":0.8,\"stream\":false}");
+            byte[] data = Encoding.UTF8.GetBytes(sb.ToString());
+
+            try { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; } catch { }
+            var req = (HttpWebRequest)WebRequest.Create(NormalizeChatUrl(url));
+            req.Method = "POST";
+            req.ContentType = "application/json";
+            req.Accept = "application/json";
+            req.Timeout = 30000;
+            req.ReadWriteTimeout = 30000;
+            if (!string.IsNullOrEmpty(key)) req.Headers["Authorization"] = "Bearer " + key;
+            req.ContentLength = data.Length;
+            using (var rs = req.GetRequestStream()) rs.Write(data, 0, data.Length);
+
+            string text;
+            try
+            {
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                    text = sr.ReadToEnd();
+            }
+            catch (WebException wex)
+            {
+                string detail = "";
+                try
+                {
+                    if (wex.Response != null)
+                        using (var sr = new StreamReader(wex.Response.GetResponseStream(), Encoding.UTF8))
+                            detail = sr.ReadToEnd();
+                }
+                catch { }
+                Log.Write("ai http: " + wex.Message + " " + Shorten(detail, 200));
+                throw new Exception(Shorten(detail.Length > 0 ? detail : wex.Message, 160));
+            }
+
+            string content = ExtractJsonField(text, "content");
+            if (content == null)
+            {
+                string em = ExtractJsonField(text, "message");
+                throw new Exception(Shorten(em != null ? em : text, 160));
+            }
+            content = content.Trim();
+            if (content.Length == 0) content = "（模型没说话）";
+            return content;
+        }
+
+        void AddChatBubble(string text, bool fromUser, bool system)
+        {
+            if (_chatList == null) return;
+            var tb = new TextBlock
+            {
+                Text = text,
+                FontSize = 13,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = system
+                    ? new SolidColorBrush(Color.FromArgb(0xFF, 0x9A, 0xA6, 0xC0))
+                    : (fromUser ? Brushes.White : new SolidColorBrush(Color.FromArgb(0xFF, 0x1E, 0x28, 0x38)))
+            };
+            var border = new Border
+            {
+                Background = system
+                    ? new SolidColorBrush(Color.FromArgb(0x1A, 0xFF, 0xFF, 0xFF))
+                    : (fromUser ? new SolidColorBrush(Color.FromArgb(0xFF, 0x4A, 0x7F, 0xD6))
+                                : new SolidColorBrush(Color.FromArgb(0xFF, 0xEF, 0xF4, 0xFD))),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(9, 6, 9, 6),
+                Margin = new Thickness(6, 4, 6, 4),
+                HorizontalAlignment = fromUser ? HorizontalAlignment.Right : HorizontalAlignment.Left,
+                MaxWidth = 300,
+                Child = tb
+            };
+            _chatList.Children.Add(border);
+            try { _chatScroll.ScrollToEnd(); } catch { }
+        }
+
+        void UpdateChatHint()
+        {
+            if (_chatHint == null) return;
+            string host = "未配置";
+            try
+            {
+                if (!string.IsNullOrEmpty(_aiUrl))
+                    host = new Uri(NormalizeChatUrl(_aiUrl)).Host;
+            }
+            catch { host = _aiUrl; }
+            _chatHint.Text = "模型：" + (string.IsNullOrEmpty(_aiModel) ? "未填" : _aiModel) + "  ·  接口：" + host
+                           + (string.IsNullOrEmpty(_aiUrl) ? "（点「设置」配置，或先当传话筒用）" : "");
+        }
+
+        void ClearChat()
+        {
+            _chatHistory.Clear();
+            if (_chatList != null) _chatList.Children.Clear();
+            AddChatBubble(IsAiConfigured() ? "清空啦，想聊点什么？" : "清空啦～先点「设置」填模型接口，我们就能聊天了。", false, true);
+        }
+
+        bool IsAiConfigured() { return !string.IsNullOrEmpty(_aiUrl) && !string.IsNullOrEmpty(_aiModel); }
+
+        void SendChat()
+        {
+            if (_chatBusy || _chatInput == null) return;
+            string text = (_chatInput.Text ?? "").Trim();
+            if (text.Length == 0) return;
+            if (text.Length > 2000) text = text.Substring(0, 2000);
+            _chatInput.Clear();
+            AddChatBubble(text, true, false);
+            _chatHistory.Add(new string[] { "user", text });
+
+            // 没配接口：退回「让豆仔念出来」
+            if (!IsAiConfigured())
+            {
+                AddChatBubble("（还没配置模型接口：点右上角「设置」填 接口地址 / API Key / 模型名。）", false, true);
+                ShowBubble(Shorten(text, 60), true, 4.0);
+                return;
+            }
+
+            string url = _aiUrl, key = _aiKey, model = _aiModel, prompt = _aiPrompt;
+            var msgs = new List<string[]>();
+            int from = Math.Max(0, _chatHistory.Count - 12);
+            for (int i = from; i < _chatHistory.Count; i++)
+                msgs.Add(new string[] { _chatHistory[i][0], _chatHistory[i][1] });
+
+            _chatBusy = true;
+            if (_chatSend != null) _chatSend.IsEnabled = false;
+            ShowBubble("豆仔想想…", true, 40.0);
+            Log.Write("ai ask model=" + model);
+
+            ThreadPool.QueueUserWorkItem(delegate(object state)
+            {
+                string reply = null, err = null;
+                try { reply = CallAi(msgs, url, key, model, prompt); }
+                catch (Exception ex) { err = ex.Message; }
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    _chatBusy = false;
+                    if (_chatSend != null) _chatSend.IsEnabled = true;
+                    if (reply != null)
+                    {
+                        _chatHistory.Add(new string[] { "assistant", reply });
+                        AddChatBubble(reply, false, false);
+                        ShowBubble(Shorten(reply, 60), true, 6.0);
+                        Log.Write("ai reply " + reply.Length + " chars");
+                    }
+                    else
+                    {
+                        AddChatBubble("（连接失败：" + (err ?? "未知错误") + "）", false, true);
+                        ShowBubble("唔…连不上模型", true, 4.0);
+                        Log.Write("ai error: " + err);
+                    }
+                }));
+            });
+        }
+
+        void ShowAiSettings()
         {
             try
             {
                 var dlg = new Window
                 {
-                    Title = "说句话",
-                    Width = 300,
-                    Height = 140,
+                    Title = "模型接口设置",
+                    Width = 450,
+                    Height = 440,
                     WindowStartupLocation = WindowStartupLocation.CenterScreen,
                     Topmost = true,
                     ResizeMode = ResizeMode.NoResize
                 };
-                var tb = new System.Windows.Controls.TextBox { Margin = new Thickness(10) };
-                var btn = new System.Windows.Controls.Button
+                var sp = new StackPanel { Margin = new Thickness(16) };
+                sp.Children.Add(new TextBlock { Text = "OpenAI 兼容接口", FontWeight = FontWeights.Bold, FontSize = 14, Margin = new Thickness(0, 0, 0, 10) });
+                sp.Children.Add(new TextBlock { Text = "接口地址（base，例：https://api.deepseek.com/v1 或 https://ark.cn-beijing.volces.com/api/v3）", Foreground = Brushes.Gray, TextWrapping = TextWrapping.Wrap });
+                var tbUrl = new TextBox { Text = _aiUrl, Margin = new Thickness(0, 3, 0, 8) };
+                sp.Children.Add(tbUrl);
+                sp.Children.Add(new TextBlock { Text = "API Key（只存在本机 config.ini，可留空）", Foreground = Brushes.Gray });
+                var tbKey = new TextBox { Text = _aiKey, Margin = new Thickness(0, 3, 0, 8) };
+                sp.Children.Add(tbKey);
+                sp.Children.Add(new TextBlock { Text = "模型名（例：deepseek-chat / gpt-4o-mini / qwen2.5 / 豆包推理接入点 ep-xxx）", Foreground = Brushes.Gray, TextWrapping = TextWrapping.Wrap });
+                var tbModel = new TextBox { Text = _aiModel, Margin = new Thickness(0, 3, 0, 8) };
+                sp.Children.Add(tbModel);
+                sp.Children.Add(new TextBlock { Text = "人设提示词（可选）", Foreground = Brushes.Gray });
+                var tbPrompt = new TextBox
                 {
-                    Content = "发送",
-                    Width = 70,
-                    Margin = new Thickness(10, 0, 10, 10),
-                    IsDefault = true
+                    Text = string.IsNullOrEmpty(_aiPrompt) ? DefaultAiPrompt : _aiPrompt,
+                    AcceptsReturn = true,
+                    Height = 74,
+                    TextWrapping = TextWrapping.Wrap,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    Margin = new Thickness(0, 3, 0, 12)
                 };
-                var panel = new System.Windows.Controls.StackPanel();
-                panel.Children.Add(tb);
-                panel.Children.Add(btn);
-                dlg.Content = panel;
-
-                btn.Click += delegate
+                sp.Children.Add(tbPrompt);
+                var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+                var btnSave = new Button { Content = "保存", Width = 80, IsDefault = true, Margin = new Thickness(0, 0, 8, 0) };
+                var btnCancel = new Button { Content = "取消", Width = 80, IsCancel = true };
+                row.Children.Add(btnSave);
+                row.Children.Add(btnCancel);
+                sp.Children.Add(row);
+                dlg.Content = sp;
+                btnSave.Click += delegate
                 {
+                    _aiUrl = (tbUrl.Text ?? "").Trim();
+                    _aiKey = (tbKey.Text ?? "").Trim();
+                    _aiModel = (tbModel.Text ?? "").Trim();
+                    _aiPrompt = (tbPrompt.Text ?? "").Trim();
+                    SaveSettings();
+                    UpdateChatHint();
+                    Log.Write("ai settings saved url=" + _aiUrl + " model=" + _aiModel);
                     dlg.Close();
-                    ApiChat(tb.Text);
                 };
-                tb.KeyDown += delegate(object s2, KeyEventArgs e2)
+                dlg.ShowDialog();
+            }
+            catch (Exception ex) { Log.Write("ai settings: " + ex.Message); }
+        }
+
+        void ShowChatWindow()
+        {
+            try
+            {
+                if (_chatWin != null)
                 {
-                    if (e2.Key == Key.Enter)
+                    if (!_chatWin.IsVisible) _chatWin.Show();
+                    _chatWin.Activate();
+                    if (_chatInput != null) _chatInput.Focus();
+                    return;
+                }
+
+                var win = new Window
+                {
+                    Title = "豆仔 · AI 聊天",
+                    Width = 390,
+                    Height = 540,
+                    MinWidth = 330,
+                    MinHeight = 380,
+                    WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                    Topmost = true,
+                    ResizeMode = ResizeMode.CanResizeWithGrip,
+                    Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x15, 0x1A, 0x2B))
+                };
+                var root = new Grid();
+                root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+                root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+                var header = new Grid { Margin = new Thickness(12, 10, 12, 4) };
+                header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                var title = new TextBlock
+                {
+                    Text = "豆仔 · AI 聊天",
+                    Foreground = Brushes.White,
+                    FontSize = 15,
+                    FontWeight = FontWeights.Bold,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                Grid.SetColumn(title, 0);
+                header.Children.Add(title);
+                var btnSet = new Button { Content = "设置", Padding = new Thickness(9, 3, 9, 3), Margin = new Thickness(4, 0, 0, 0) };
+                btnSet.Click += delegate { ShowAiSettings(); };
+                Grid.SetColumn(btnSet, 1);
+                header.Children.Add(btnSet);
+                var btnClear = new Button { Content = "清空", Padding = new Thickness(9, 3, 9, 3), Margin = new Thickness(4, 0, 0, 0) };
+                btnClear.Click += delegate { ClearChat(); };
+                Grid.SetColumn(btnClear, 2);
+                header.Children.Add(btnClear);
+                root.Children.Add(header);
+                Grid.SetRow(header, 0);
+
+                _chatHint = new TextBlock
+                {
+                    FontSize = 11,
+                    Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0x8C, 0x98, 0xB0)),
+                    Margin = new Thickness(14, 0, 14, 6),
+                    TextWrapping = TextWrapping.Wrap
+                };
+                root.Children.Add(_chatHint);
+                Grid.SetRow(_chatHint, 1);
+
+                _chatScroll = new ScrollViewer
+                {
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    Margin = new Thickness(10, 2, 10, 6),
+                    Padding = new Thickness(2),
+                    Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x10, 0x14, 0x22))
+                };
+                _chatList = new StackPanel();
+                _chatScroll.Content = _chatList;
+                root.Children.Add(_chatScroll);
+                Grid.SetRow(_chatScroll, 2);
+
+                var inputBar = new DockPanel { Margin = new Thickness(10, 4, 10, 12), LastChildFill = true };
+                _chatSend = new Button { Content = "发送", Width = 66, Margin = new Thickness(6, 0, 0, 0) };
+                _chatSend.Click += delegate { SendChat(); };
+                DockPanel.SetDock(_chatSend, Dock.Right);
+                _chatInput = new TextBox { FontSize = 13, Padding = new Thickness(6, 4, 6, 4) };
+                _chatInput.KeyDown += delegate(object s2, KeyEventArgs e2)
+                {
+                    if (e2.Key == Key.Enter || e2.Key == Key.Return) { SendChat(); e2.Handled = true; }
+                };
+                inputBar.Children.Add(_chatSend);
+                inputBar.Children.Add(_chatInput);
+                root.Children.Add(inputBar);
+                Grid.SetRow(inputBar, 3);
+
+                win.Content = root;
+                win.Closed += delegate
+                {
+                    _chatWin = null;
+                    _chatList = null;
+                    _chatScroll = null;
+                    _chatInput = null;
+                    _chatSend = null;
+                    _chatHint = null;
+                };
+                win.PreviewKeyDown += delegate(object s2, KeyEventArgs e2)
+                {
+                    // 回车发送（窗口级兜底：输入框失焦也能发）
+                    if (e2.Key == Key.Enter || e2.Key == Key.Return)
                     {
-                        dlg.Close();
-                        ApiChat(tb.Text);
+                        SendChat();
+                        e2.Handled = true;
+                        return;
+                    }
+                    if (e2.Key == Key.O && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+                    {
+                        ShowAiSettings();
+                        e2.Handled = true;
+                    }
+                    else if (e2.Key == Key.Escape)
+                    {
+                        win.Close();
+                        e2.Handled = true;
                     }
                 };
-                dlg.Show();
+                win.Loaded += delegate { try { _chatInput.Focus(); } catch { } };
+
+                _chatWin = win;
+                UpdateChatHint();
+                for (int i = 0; i < _chatHistory.Count; i++)
+                    AddChatBubble(_chatHistory[i][1], _chatHistory[i][0] == "user", false);
+                if (_chatHistory.Count == 0)
+                {
+                    if (IsAiConfigured()) AddChatBubble("你好呀，我是豆仔～想聊点什么？", false, false);
+                    else AddChatBubble("你好呀，我是豆仔～先点右上角「设置」填一下模型接口（OpenAI 兼容），我们就能聊天啦。Ctrl+O 也能打开设置。", false, true);
+                }
+                win.Show();
             }
-            catch (Exception ex) { Log.Write("speak dialog: " + ex.Message); }
+            catch (Exception ex) { Log.Write("chat window: " + ex.Message); }
         }
 
         // ================= 外部控制 API =================
@@ -2611,12 +3055,15 @@ namespace DesktopPet
         }
 
         // speak=false：只出气泡不动嘴（睡眠时的 Zzz 用这条，睡着不该吧唧嘴）
-        void ShowBubble(string text, bool speak = true)
+        void ShowBubble(string text, bool speak = true) { ShowBubble(text, speak, 3.0); }
+
+        void ShowBubble(string text, bool speak, double seconds)
         {
             _bubbleText.Text = string.IsNullOrEmpty(text) ? "..." : text;
             _bubble.Visibility = Visibility.Visible;
             _bubble.Opacity = 1;
             _bubbleTimer.Stop();
+            _bubbleTimer.Interval = TimeSpan.FromSeconds(Math.Max(1.0, seconds));
             _bubbleTimer.Start();
             if (speak) StartTalking();    // P0-5 气泡期间嘴张合
         }
