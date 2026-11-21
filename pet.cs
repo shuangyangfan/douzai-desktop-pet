@@ -645,6 +645,8 @@ namespace DesktopPet
             public System.Windows.Shapes.Path Shape;
             public TextBlock Text;
             public TextBlock Tick;
+            public Brush FillNorm;
+            public Brush FillHot;
         }
 
         const double RadialSize = 266;
@@ -663,11 +665,28 @@ namespace DesktopPet
         Brush _radialFillNorm, _radialFillHot, _radialTextNorm, _radialTextHot;
         ContextMenu _menuFallback;
 
+        // 12 格各自的底色（跟着功能区分配：动作类偏暖，系统类偏冷，隐藏灰、退出红）
+        static readonly Color[] RadialColors = new Color[]
+        {
+            Color.FromArgb(0xFF, 0x4E, 0x9E, 0xDC),   // 0 说话  蓝
+            Color.FromArgb(0xFF, 0x33, 0xA8, 0xA0),   // 1 弹跳  青
+            Color.FromArgb(0xFF, 0x4F, 0xAE, 0x5F),   // 2 摇头  绿
+            Color.FromArgb(0xFF, 0x92, 0xC2, 0x3F),   // 3 转圈  草绿
+            Color.FromArgb(0xFF, 0xDF, 0xC1, 0x3F),   // 4 害羞  黄
+            Color.FromArgb(0xFF, 0xDF, 0x8A, 0x42),   // 5 睡眠  橙
+            Color.FromArgb(0xFF, 0xD6, 0x5C, 0x7C),   // 6 魔法球 玫红
+            Color.FromArgb(0xFF, 0xB0, 0x53, 0xBF),   // 7 暂停  紫
+            Color.FromArgb(0xFF, 0x6F, 0x6D, 0xD6),   // 8 跟随  靛蓝
+            Color.FromArgb(0xFF, 0x4A, 0x7F, 0xD6),   // 9 自启  宝蓝
+            Color.FromArgb(0xFF, 0x6E, 0x7C, 0x8C),   // 10 隐藏 石板灰
+            Color.FromArgb(0xFF, 0xC8, 0x43, 0x3F)    // 11 退出 红
+        };
+
         void BuildRadial()
         {
             _radialFillNorm = new SolidColorBrush(Color.FromArgb(0xB4, 0x2C, 0x5F, 0x9B));
             _radialFillHot = new SolidColorBrush(Color.FromArgb(0xE8, 0x77, 0xCB, 0xFF));
-            _radialTextNorm = new SolidColorBrush(Color.FromArgb(0xFF, 0xE8, 0xF5, 0xFF));
+            _radialTextNorm = Brushes.White;
             _radialTextHot = Brushes.White;
 
             _radialCanvas = new Canvas { Width = RadialSize, Height = RadialSize, IsHitTestVisible = false, Background = Brushes.Transparent };
@@ -677,7 +696,7 @@ namespace DesktopPet
             {
                 Width = (RadialOuter + 4) * 2,
                 Height = (RadialOuter + 4) * 2,
-                Stroke = new SolidColorBrush(Color.FromArgb(0x8A, 0xD8, 0xF4, 0xFF)),
+                Stroke = new SolidColorBrush(Color.FromArgb(0x66, 0xFF, 0xFF, 0xFF)),
                 StrokeThickness = 1.4,
                 Fill = null
             };
@@ -695,7 +714,7 @@ namespace DesktopPet
             fIn.Segments.Add(new ArcSegment { Point = new Point(cx - RadialInner, cy), Size = new Size(RadialInner, RadialInner), SweepDirection = SweepDirection.Counterclockwise });
             baseGeo.Figures.Add(fOut);
             baseGeo.Figures.Add(fIn);
-            var baseDonut = new System.Windows.Shapes.Path { Data = baseGeo, Fill = new SolidColorBrush(Color.FromArgb(0x8A, 0x18, 0x36, 0x5E)) };
+            var baseDonut = new System.Windows.Shapes.Path { Data = baseGeo, Fill = new SolidColorBrush(Color.FromArgb(0x8C, 0x33, 0x3B, 0x46)) };
             _radialCanvas.Children.Add(baseDonut);
 
             // 中间不再垫底、也不再写"取消"：圆洞里只留豆仔的脸（点洞中心 = 取消）
@@ -746,11 +765,19 @@ namespace DesktopPet
             var geo = new PathGeometry();
             geo.Figures.Add(fig);
 
+            // 每格一种颜色（参照第三张图的八色扇区）：常态半透明，悬停整块提亮
+            Color baseCol = RadialColors[index % RadialColors.Length];
+            var fillNorm = new SolidColorBrush(Color.FromArgb(0xDE, baseCol.R, baseCol.G, baseCol.B));
+            var fillHot = new SolidColorBrush(Color.FromArgb(0xFF,
+                (byte)(baseCol.R + (255 - baseCol.R) * 0.22),
+                (byte)(baseCol.G + (255 - baseCol.G) * 0.22),
+                (byte)(baseCol.B + (255 - baseCol.B) * 0.22)));
+
             var shape = new System.Windows.Shapes.Path
             {
                 Data = geo,
-                Fill = _radialFillNorm,
-                Stroke = new SolidColorBrush(Color.FromArgb(0x38, 0x8F, 0xC8, 0xFF)),
+                Fill = fillNorm,
+                Stroke = new SolidColorBrush(Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF)),
                 StrokeThickness = 1
             };
             _radialCanvas.Children.Add(shape);
@@ -761,30 +788,31 @@ namespace DesktopPet
                 Text = label,
                 FontSize = 12,
                 FontFamily = new FontFamily("Microsoft YaHei UI"),
-                Foreground = _radialTextNorm,
-                Width = 64,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)),
+                Width = 56,
                 TextAlignment = TextAlignment.Center
             };
-            Canvas.SetLeft(text, cx + r * Math.Cos(mid * Math.PI / 180.0) - 36);
+            Canvas.SetLeft(text, cx + r * Math.Cos(mid * Math.PI / 180.0) - 28);
             Canvas.SetTop(text, cy + r * Math.Sin(mid * Math.PI / 180.0) - 9);
             _radialCanvas.Children.Add(text);
 
             var tick = new TextBlock
             {
-                Text = "✓",
-                FontSize = 10,
+                Text = "●",
+                FontSize = 8,
                 FontFamily = new FontFamily("Microsoft YaHei UI"),
-                Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0x7E, 0xD8, 0xFF)),
-                Width = 14,
+                Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)),
+                Width = 10,
                 TextAlignment = TextAlignment.Center,
                 Visibility = Visibility.Hidden
             };
-            double rt = RadialOuter - 12;
-            Canvas.SetLeft(tick, cx + rt * Math.Cos(mid * Math.PI / 180.0) - 7);
-            Canvas.SetTop(tick, cy + rt * Math.Sin(mid * Math.PI / 180.0) - 7);
+            double rt = RadialInner + 7;
+            Canvas.SetLeft(tick, cx + rt * Math.Cos(mid * Math.PI / 180.0) - 5);
+            Canvas.SetTop(tick, cy + rt * Math.Sin(mid * Math.PI / 180.0) - 5);
             _radialCanvas.Children.Add(tick);
 
-            _radialItems.Add(new RadialItem { Label = label, Run = run, IsOn = isOn, DynLabel = dyn, Shape = shape, Text = text, Tick = tick });
+            _radialItems.Add(new RadialItem { Label = label, Run = run, IsOn = isOn, DynLabel = dyn, Shape = shape, Text = text, Tick = tick, FillNorm = fillNorm, FillHot = fillHot });
         }
 
         bool IsDoze() { return _state == State.Doze; }
@@ -903,11 +931,17 @@ namespace DesktopPet
         void ApplyRadialHover()
         {
             if (_radialItems == null) return;
+            var strokeNorm = new SolidColorBrush(Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF));
+            var strokeHot = new SolidColorBrush(Color.FromArgb(0xEE, 0xFF, 0xFF, 0xFF));
             for (int i = 0; i < _radialItems.Count; i++)
             {
+                var it = _radialItems[i];
                 bool hot = (i == _radialHover);
-                _radialItems[i].Shape.Fill = hot ? _radialFillHot : _radialFillNorm;
-                _radialItems[i].Text.Foreground = hot ? _radialTextHot : _radialTextNorm;
+                it.Shape.Fill = hot ? it.FillHot : it.FillNorm;
+                it.Shape.Stroke = hot ? strokeHot : strokeNorm;
+                it.Shape.StrokeThickness = hot ? 2 : 1;
+                it.Text.Foreground = hot ? _radialTextHot : _radialTextNorm;
+                it.Text.FontWeight = hot ? FontWeights.Bold : FontWeights.SemiBold;
             }
         }
 
