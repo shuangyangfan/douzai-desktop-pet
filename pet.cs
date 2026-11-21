@@ -189,8 +189,15 @@ namespace DesktopPet
         ScaleTransform3D[] _blushScales;
         // FIX-GROUND P0-1/P0-2：影子随高度收缩变淡 + 落地果冻形变（欠阻尼弹簧标量）
         ScaleTransform3D _shadowScale;
-        SolidColorBrush[] _shadowBrushes;
-        readonly double[] _shadowBaseA = { 34, 24, 16 };
+        System.Windows.Shapes.Rectangle _shadow2D;          // FIX-SHADOW2D：贴地 2D 软影（3D 盘片被球体遮挡，实际看不见）
+        ScaleTransform _shadow2DScale;
+        RadialGradientBrush _shadowGrad;                    // 单张径向渐变影子，替代原三层硬边叠片（会看出三环台阶）
+        readonly double[] _shadowStopA = { 120, 66, 26, 0 }; // 四个色标的基浓度（0.00/0.38/0.72/1.00）
+        double _bgLum = 1.0;                                // 脚下桌面亮度：0=黑 1=白，决定影子投暗影还是投光晕
+        double _bgSampleT;
+        RadialGradientBrush _floorPoolGrad;                  // 光照池（也要跟着明暗换色，否则深色壁纸上整块地面消失）
+        readonly System.Collections.Generic.List<SolidColorBrush> _floorLineBrushes
+            = new System.Collections.Generic.List<SolidColorBrush>();   // 每根网格线的画刷，同上
         ScaleTransform3D _squashScale;
         ScaleTransform3D _faceSquashScale;   // 五官组：触地下压时随身体一起变形（Center=球底，ScaleY 同时产生下压位移）
         double _squash, _squashV;
@@ -252,6 +259,29 @@ namespace DesktopPet
         const double DozeAfterSeconds = 300;   // 5 分钟无交互进入 Doze
         // 闲逛侧身角：原来 ±90° 会把眼/腮红/嘴压到球的轮廓线上（薄片感），收窄到 ±35°
         const double WalkYawDeg = 35;
+        // 姿态接管的朝向上限：比走路的 35 更保守。走路时侧身是"走过去"的合理姿态，
+        // 但正面看你时脸一旦转过去，五官就压到球轮廓上露馅了（实测 -35 左眼已贴边，-24 安全）
+        const double PoseYawDeg = 24;
+
+        // ================= POSE 通道：AI 连续姿态注入 =================
+        // NaN = 这一项不接管，回落到原有的情绪/闲逛逻辑；一旦写入就逐帧缓动靠近，永不瞬跳。
+        // 这是给外部 AI 用的"关节角度"，不是"选动画"——原有状态机全部保留，只是被覆盖。
+        double _poseEye = double.NaN;       // 眼睛开合 0.05~1.4（眨眼仍由 Blink 覆盖）
+        double _poseBlush = double.NaN;     // 腮红 0~2.5
+        double _poseYaw = double.NaN;       // 朝向角 -180~180（一经接管，AnimateYaw 被逐帧掐掉）
+        double _poseGazeX = double.NaN;     // 瞳孔注视 -1~1（接管时绕过鼠标跟随）
+        double _poseGazeY = double.NaN;
+        double _poseBreathAmp = double.NaN; // 呼吸幅度 0~0.2
+        double _poseBreathFreq = double.NaN;// 呼吸频率 0.2~6
+        double _poseHold;                    // 剩余接管秒数，归零自动归还控制权
+        int _lastPoseTick;                   // 上一次姿态节拍的墙钟毫秒（.NET Framework 无 TickCount64，int 回绕用 unchecked 差值抵消）
+        double _moodBlush = 1.0;             // 情绪里的腮红基准，姿态释放时还原用
+        // 平滑后的当前值（起始值 = 中性姿态，避免接管瞬间跳变）
+        double _curPoseEye = 1.0;
+        double _curPoseBlush = 1.0;
+        double _curPoseYaw;
+        double _curPoseBreathAmp = 0.04;
+        double _curPoseBreathFreq = 2.0;
 
         // 移动钉住 + 暂停闲逛
         double _pinTimer;              // /pet/move 后钉住秒数（期间不闲逛）
@@ -624,6 +654,10 @@ namespace DesktopPet
                     _nearBoost = dist < 60 ? 1.15 : 1.0;   // 靠近 60px 内眼睛放大
                 }
 
+                // 姿态接管时，注视方向由外部给，绕过鼠标跟随
+                if (!double.IsNaN(_poseGazeX))
+                    _pupilTarget = new Vector(_poseGazeX * PupilMax, _poseGazeY * PupilMax);
+
                 // 缓动：每帧向目标插值 20%，不瞬移
                 _pupilCur += (_pupilTarget - _pupilCur) * 0.2;
                 _pupilOffset.OffsetX = _pupilCur.X;
@@ -762,7 +796,10 @@ namespace DesktopPet
                    ",\"y\":" + (int)Top +
                    ",\"port\":" + _server.Port +
                    ",\"visible\":" + (Visibility == Visibility.Visible ? "true" : "false") +
-                   ",\"mood\":\"" + _mood + "\"}";
+                   ",\"mood\":\"" + _mood + "\"" +
+                   ",\"pose\":" + (_poseHold > 0 ? "true" : "false") +
+                   ",\"floor\":" + _floorParallax.ToString("F3") +
+                   ",\"bg\":" + _bgLum.ToString("F2") + "}";
         }
 
         // ================= P0-6 情绪状态机 =================
@@ -808,6 +845,7 @@ namespace DesktopPet
         {
             _mood = mood;
             _moodEyes = eyes;
+            _moodBlush = blush;
             _moodFloatFreq = freq;
             _moodFloatAmp = amp;
             SetBlush(blush);
@@ -819,6 +857,106 @@ namespace DesktopPet
                     AnimateYaw(0);
             }
             Log.Write("mood=" + mood + " eyes=" + eyes + " blush=" + blush);
+        }
+
+        // ================= POSE 通道实现 =================
+
+        // 外部传进来的一次姿态指令：NaN 表示该项不接管
+        public sealed class PoseCmd
+        {
+            public double Eye = double.NaN;
+            public double Blush = double.NaN;
+            public double Yaw = double.NaN;
+            public double GazeX = double.NaN;
+            public double GazeY = double.NaN;
+            public double BreathAmp = double.NaN;
+            public double BreathFreq = double.NaN;
+            public double Hold = 6.0;    // 接管时长（秒），到点自动归还控制权
+            public bool Clear;           // true = 立刻放开全部接管
+        }
+
+        static double PoseClamp(double v, double lo, double hi)
+        {
+            if (double.IsNaN(v)) return double.NaN;
+            return v < lo ? lo : (v > hi ? hi : v);
+        }
+
+        // 所有 Api* 都要求 UI 线程；外部一律用 BeginInvoke 投过来
+        public void ApiPose(PoseCmd p)
+        {
+            try
+            {
+                if (p == null) return;
+                if (p.Clear)
+                {
+                    ReleasePose("clear");
+                    return;
+                }
+                _poseEye = PoseClamp(p.Eye, 0.05, 1.4);
+                _poseBlush = PoseClamp(p.Blush, 0.0, 2.5);
+                _poseYaw = PoseClamp(p.Yaw, -PoseYawDeg, PoseYawDeg);   // 超过这个角五官会贴到球轮廓上
+                _poseGazeX = PoseClamp(p.GazeX, -1.0, 1.0);
+                _poseGazeY = PoseClamp(p.GazeY, -1.0, 1.0);
+                _poseBreathAmp = PoseClamp(p.BreathAmp, 0.0, 0.20);
+                _poseBreathFreq = PoseClamp(p.BreathFreq, 0.2, 6.0);
+                _poseHold = p.Hold <= 0 ? 6.0 : Math.Min(p.Hold, 60.0);
+                if (_state == State.Walk) EnterIdle();   // 接管期间不许再走来走去
+                Log.Write("pose eye=" + _poseEye.ToString("F2") + " blush=" + _poseBlush.ToString("F2") +
+                          " yaw=" + _poseYaw.ToString("F0") + " gaze=" + _poseGazeX.ToString("F2") + "," +
+                          _poseGazeY.ToString("F2") + " hold=" + _poseHold.ToString("F1"));
+            }
+            catch (Exception ex) { Log.Write("api pose: " + ex.Message); }
+        }
+
+        void ReleasePose(string why)
+        {
+            _poseEye = _poseBlush = _poseYaw = _poseGazeX = _poseGazeY = double.NaN;
+            _poseBreathAmp = _poseBreathFreq = double.NaN;
+            _poseHold = 0;
+            if (_blushScales != null) SetBlush(_moodBlush);
+            // 朝向必须显式收回：否则松手后她会一直歪着头（原逻辑只在状态切换时才重置 yaw）
+            if (_state == State.Walk) AnimateYaw(_dir > 0 ? WalkYawDeg : -WalkYawDeg);
+            else AnimateYaw(0);
+            Log.Write("pose release (" + why + ")");
+        }
+
+        // 每帧调用：先衰减接管计时，再把目标值往当前值拉（缓动，绝不瞬跳）
+        void TickPose(double dt)
+        {
+            int now = Environment.TickCount;
+            double wdt = _lastPoseTick == 0 ? dt : unchecked(now - _lastPoseTick) * 0.001;   // 墙钟增量
+            _lastPoseTick = now;
+            if (wdt < 0 || wdt > 1.0) wdt = dt;                                      // 卡顿/休眠时兜底
+            if (_poseHold > 0)
+            {
+                _poseHold -= wdt;
+                if (_poseHold <= 0) { ReleasePose("timeout"); return; }
+            }
+            if (!double.IsNaN(_poseEye)) _curPoseEye += (_poseEye - _curPoseEye) * 0.18;
+            else _curPoseEye = _moodEyes;
+
+            if (!double.IsNaN(_poseBlush))
+            {
+                _curPoseBlush += (_poseBlush - _curPoseBlush) * 0.18;
+                SetBlush(_curPoseBlush);
+            }
+            else _curPoseBlush = _moodBlush;
+
+            if (!double.IsNaN(_poseYaw))
+            {
+                double delta = _poseYaw - _curPoseYaw;
+                delta = ((delta + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;   // 走最短路径
+                _curPoseYaw += delta * 0.18;
+                var rot = (AxisAngleRotation3D)_yaw.Rotation;
+                rot.BeginAnimation(AxisAngleRotation3D.AngleProperty, null);  // 掐掉正在跑的 AnimateYaw
+                rot.Angle = _curPoseYaw;
+            }
+            else _curPoseYaw = ((AxisAngleRotation3D)_yaw.Rotation).Angle;
+
+            if (!double.IsNaN(_poseBreathAmp)) _curPoseBreathAmp += (_poseBreathAmp - _curPoseBreathAmp) * 0.12;
+            else _curPoseBreathAmp = _moodFloatAmp;
+            if (!double.IsNaN(_poseBreathFreq)) _curPoseBreathFreq += (_poseBreathFreq - _curPoseBreathFreq) * 0.12;
+            else _curPoseBreathFreq = _moodFloatFreq;
         }
 
         void SetBlush(double factor)
@@ -1055,6 +1193,33 @@ namespace DesktopPet
             var grid = new Grid();
             grid.Children.Add(BuildScene());
 
+            // FIX-SHADOW2D：3D 影子盘受相机俯角 14° 和球体遮挡影响，浓的那圈全藏在球背后，
+            // 投影出来只剩全透明的尾巴，等于没有影子。改成贴在视口底部的一层 2D 径向渐变软影，
+            // 任何壁纸、任何跳跃高度都能稳定"踩在地上"，也不再有 3D 盘片的透视错位
+            _shadow2D = new System.Windows.Shapes.Rectangle
+            {
+                Width = 210, Height = 64,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Margin = new Thickness(0, 0, 0, 46),
+                IsHitTestVisible = false,
+                Opacity = 0.0
+            };
+            var shBrush = new RadialGradientBrush();
+            shBrush.GradientOrigin = new Point(0.5, 0.5);
+            shBrush.Center = new Point(0.5, 0.5);
+            shBrush.RadiusX = 0.5;
+            shBrush.RadiusY = 0.5;
+            shBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0xCC, 0x0A, 0x12, 0x1C), 0.00));
+            shBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0x6A, 0x0A, 0x12, 0x1C), 0.50));
+            shBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0x14, 0x0A, 0x12, 0x1C), 0.80));
+            shBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 0x0A, 0x12, 0x1C), 1.00));
+            _shadow2D.Fill = shBrush;
+            _shadow2DScale = new ScaleTransform(1, 1);
+            _shadow2D.RenderTransformOrigin = new Point(0.5, 0.5);
+            _shadow2D.RenderTransform = _shadow2DScale;
+            grid.Children.Insert(0, _shadow2D);   // 插到最底层，保证在 3D 视口后面
+
             _bubble = new Border
             {
                 Background = new SolidColorBrush(Color.FromArgb(235, 0xFF, 0xFF, 0xFF)),
@@ -1121,29 +1286,203 @@ namespace DesktopPet
             fill.Direction = new Vector3D(0.85, 0.55, -0.35);
             content.Children.Add(fill);
 
-            // 地面软阴影：三层同心叠片伪径向渐变，全部沉到球底之下（原单层 y=0.01 会横切球底）
-            _shadowBrushes = new SolidColorBrush[3];
-            double[] shadowR = { 1.15, 0.95, 0.75 };
-            double[] shadowY = { -0.021, -0.019, -0.017 };   // 错开 0.002 防 Z-fighting
-            _shadowScale = new ScaleTransform3D();            // Center 默认 (0,0,0)，disc 以原点为中心
-            for (int i = 0; i < 3; i++)
-            {
-                // 影子用冷调黑，纯黑在蓝球下显脏；透明度下调防中心过重、减轻三环台阶
-                _shadowBrushes[i] = new SolidColorBrush(Color.FromArgb((byte)_shadowBaseA[i], 0x12, 0x1C, 0x2A));
-                var disc = new GeometryModel3D(MakeDisc(shadowR[i], 32),
-                    new DiffuseMaterial(_shadowBrushes[i]));
-                var dgroup = new Transform3DGroup();
-                dgroup.Children.Add(new TranslateTransform3D(0, shadowY[i], 0));
-                dgroup.Children.Add(_shadowScale);
-                disc.Transform = dgroup;
-                content.Children.Add(disc);
-            }
+            // 地面软阴影：一整张 quad + 径向渐变（真渐隐，中心浓→边缘化到 0）
+            // 原来三层同心硬边盘叠出来的假模糊，投影后能看出三环台阶；现在一张图搞定，也不再需要错开 y 防 Z-fighting
+            _shadowGrad = new RadialGradientBrush();
+            _shadowGrad.GradientOrigin = new Point(0.5, 0.5);
+            _shadowGrad.Center = new Point(0.5, 0.5);
+            _shadowGrad.RadiusX = 0.5;
+            _shadowGrad.RadiusY = 0.5;
+            double[] stopPos = { 0.00, 0.30, 0.55, 1.00 };
+            for (int i = 0; i < stopPos.Length; i++)
+                _shadowGrad.GradientStops.Add(new GradientStop(Color.FromArgb(0, 0x12, 0x1C, 0x2A), stopPos[i]));
 
+            var sMesh = new MeshGeometry3D();
+            double sr = 2.60;                                   // 球半径是 1.0，影子盘必须明显大于球，否则浓的部分全被球挡住只剩全透明尾巴
+            double sy = -0.022;
+            sMesh.Positions.Add(new Point3D(-sr, sy, sr));
+            sMesh.Positions.Add(new Point3D(sr, sy, sr));
+            sMesh.Positions.Add(new Point3D(sr, sy, -sr));
+            sMesh.Positions.Add(new Point3D(-sr, sy, -sr));
+            sMesh.TextureCoordinates.Add(new Point(0, 0));
+            sMesh.TextureCoordinates.Add(new Point(1, 0));
+            sMesh.TextureCoordinates.Add(new Point(1, 1));
+            sMesh.TextureCoordinates.Add(new Point(0, 1));
+            sMesh.TriangleIndices.Add(0); sMesh.TriangleIndices.Add(1); sMesh.TriangleIndices.Add(2);
+            sMesh.TriangleIndices.Add(0); sMesh.TriangleIndices.Add(2); sMesh.TriangleIndices.Add(3);
+            _shadowScale = new ScaleTransform3D();             // Center 默认原点，quad 已居中于原点
+            var shModel = new GeometryModel3D(sMesh, new DiffuseMaterial(_shadowGrad));
+            shModel.Transform = _shadowScale;
+            // FIX-SHADOW2D：保留几何体但不再入场，影子交给 2D 软影渲染
+            // content.Children.Add(shModel);
+            RefreshShadow(0);
+
+            // FIX-SHADOW2D：伪 3D 地面（光池）也撤掉——它在 3D 层叠在 2D 影子上，把影子洗白了；用户也反馈这块效果不好
+            // content.Children.Add(BuildFloor());
             content.Children.Add(BuildPet());
 
             var visual = new ModelVisual3D { Content = content };
             viewport.Children.Add(visual);
             return viewport;
+        }
+
+        // ============ 伪 3D 地面 ============
+        // 球的脚底是 y=0（球体半径 1、整体上移 1），影子在 y≈-0.02。
+        // 地面压到 -0.035，影子才浮在地面上而不是被吞掉。
+        // 纵深靠两件事：透视收束（近大远小）+ 远处实心化到全透明，看不到边就不像一块板子。
+        double _prevLeftParallax = double.NaN;
+        Model3DGroup BuildFloor()
+        {
+            var group = new Model3DGroup();
+            const double yF = -0.035;
+
+            // 光池（替代整片地面）：只在她脚下铺一小块椭圆，四周全化掉
+            // 之前试过铺满 28 单位的整片地面，结果是窗口边缘被切出一道硬边、整块变灰，立刻露馅像"桌上的板子"
+            var mesh = new MeshGeometry3D();
+            mesh.Positions.Add(new Point3D(-2.2, yF, 0.55));
+            mesh.Positions.Add(new Point3D(2.2, yF, 0.55));
+            mesh.Positions.Add(new Point3D(2.2, yF, -2.2));
+            mesh.Positions.Add(new Point3D(-2.2, yF, -2.2));
+            mesh.TextureCoordinates.Add(new Point(0, 0));
+            mesh.TextureCoordinates.Add(new Point(1, 0));
+            mesh.TextureCoordinates.Add(new Point(1, 1));
+            mesh.TextureCoordinates.Add(new Point(0, 1));
+            mesh.TriangleIndices.Add(0); mesh.TriangleIndices.Add(1); mesh.TriangleIndices.Add(2);
+            mesh.TriangleIndices.Add(0); mesh.TriangleIndices.Add(2); mesh.TriangleIndices.Add(3);
+
+            var grad = new RadialGradientBrush();
+            grad.GradientOrigin = new Point(0.5, 0.42);
+            grad.Center = new Point(0.5, 0.42);
+            grad.RadiusX = 0.50;
+            grad.RadiusY = 0.55;
+            grad.GradientStops.Add(new GradientStop(Color.FromArgb(0x34, 0x10, 0x1C, 0x30), 0.00));
+            grad.GradientStops.Add(new GradientStop(Color.FromArgb(0x16, 0x10, 0x1C, 0x30), 0.38));
+            grad.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 0x10, 0x1C, 0x30), 0.80));
+            _floorPoolGrad = grad;
+            group.Children.Add(new GeometryModel3D(mesh, new DiffuseMaterial(grad)));
+
+            // 透视网格已移除：窗口是全透明的，这些细线会直接横穿后面的其它窗口内容，
+            // 看起来像屏幕划痕而不是地面；地面的"站住感"改由贴地的接触阴影承担。
+
+            // 镜头滞后：窗口移动时地面反向轻移，模拟相机比主体慢半拍
+            _floorShift = new TranslateTransform3D();
+            group.Transform = _floorShift;
+            return group;
+        }
+
+        TranslateTransform3D _floorShift;
+        double _floorParallax;
+
+        // 镜头滞后：窗口横移时地面先反向甩一点，随后慢慢回正——这是"相机比主体慢半拍"的错觉
+        void TickParallax()
+        {
+            if (_floorShift == null) return;
+            double dx = double.IsNaN(_prevLeftParallax) ? 0 : Left - _prevLeftParallax;
+            _prevLeftParallax = Left;
+            if (dx > 60 || dx < -60) dx = 0;          // 拖动瞬移/切屏时别把地面甩出去
+            double target = -dx * 0.034;              // 实测：0.006→2px、0.022→5.4px（都太轻），0.034 约 8px
+            if (target > 0.55) target = 0.55;
+            if (target < -0.55) target = -0.55;
+            _floorParallax += (target - _floorParallax) * 0.12;
+            _floorShift.OffsetX = _floorParallax;
+        }
+
+        // 影子浓淡 = 基浓度 × 离地衰减 × 背景明暗；浅桌面投冷调暗影，深桌面改投淡光晕（纯黑影子在黑底上等于没有）
+        void RefreshShadow(double h)
+        {
+            if (_shadowGrad == null) return;
+            double heightK = Math.Max(0.0, 1.0 - 0.6 * h);
+            double litK = Math.Min(1.0, Math.Max(0.0, (_bgLum - 0.35) / 0.40));   // 0=深底 1=浅底
+            double opacity = (0.95 - 0.42 * litK) * heightK;                       // 浅底阴影重、深底轻（深底留深色影子本来就是隐形，宁可淡也别发白）
+            for (int i = 0; i < _shadowGrad.GradientStops.Count && i < _shadowStopA.Length; i++)
+            {
+                byte a = (byte)(_shadowStopA[i] * opacity);
+                byte r = 0x0E;   // 影子永远是"偏冷的深灰蓝"，不再跟背景明暗翻成亮蓝白
+                byte g = 0x16;
+                byte b = 0x22;
+                _shadowGrad.GradientStops[i].Color = Color.FromArgb(a, r, g, b);
+            }
+
+            // 地面跟着一起换：浅底用深灰线，深底用浅灰线，否则深色壁纸上网格和光池等于隐形，"站不住"
+            for (int i = 0; i < _floorLineBrushes.Count; i++)
+            {
+                var old = _floorLineBrushes[i].Color;
+                _floorLineBrushes[i].Color = Color.FromArgb(old.A,
+                    (byte)(0xE2 + (0x18 - 0xE2) * litK),
+                    (byte)(0xEA + (0x2A - 0xEA) * litK),
+                    (byte)(0xF6 + (0x40 - 0xF6) * litK));
+            }
+            if (_floorPoolGrad != null)
+            {
+                for (int i = 0; i < _floorPoolGrad.GradientStops.Count; i++)
+                {
+                    var old = _floorPoolGrad.GradientStops[i].Color;
+                    _floorPoolGrad.GradientStops[i].Color = Color.FromArgb(old.A,
+                        (byte)(0xE6 + (0x10 - 0xE6) * litK),
+                        (byte)(0xEE + (0x1C - 0xEE) * litK),
+                        (byte)(0xFF + (0x30 - 0xFF) * litK));
+                }
+            }
+
+            // 2D 软影：跳得越高摊得越大、越淡；浅桌面加浓（深桌面加深反正也看不见）
+            if (_shadow2D != null && _shadow2DScale != null)
+            {
+                _shadow2DScale.ScaleX = 1.0 + 0.22 * h;
+                _shadow2DScale.ScaleY = 1.0 + 0.10 * h;
+                _shadow2D.Opacity = (0.80 + 0.20 * litK) * heightK;
+            }
+        }
+
+        // 每秒抄一次脚下的桌面颜色：抄点特意放在影子外侧，否则会把影子本身抄进去，越抄越黑
+        void TickShadowBg(double dt)
+        {
+            _bgSampleT -= dt;
+            if (_bgSampleT > 0) return;
+            _bgSampleT = 1.2;
+            try
+            {
+                var sp = PointToScreen(new Point(Width * 0.18, Height * 0.90));
+                int px = (int)Math.Round(sp.X), py = (int)Math.Round(sp.Y);
+                double sum = 0; int n = 0;
+                using (var bmp = new System.Drawing.Bitmap(7, 7))
+                using (var g = System.Drawing.Graphics.FromImage(bmp))
+                {
+                    g.CopyFromScreen(px - 3, py - 3, 0, 0, new System.Drawing.Size(7, 7));
+                    for (int yy = 0; yy < 7; yy++)
+                        for (int xx = 0; xx < 7; xx++)
+                        {
+                            var c = bmp.GetPixel(xx, yy);
+                            sum += (0.299 * c.R + 0.587 * c.G + 0.114 * c.B) / 255.0;
+                            n++;
+                        }
+                }
+                if (n > 0)
+                {
+                    _bgLum += (sum / n - _bgLum) * 0.5;      // 平滑，背景有动画时影子不跟着抖；0.5 约 3 秒收敛
+                    RefreshShadow(_shadowAppliedH > 0 ? _shadowAppliedH : 0);
+                }
+            }
+            catch { }
+        }
+
+        // 一条贴在地面上的细长四边形（width 是它的横向粗细，world 单位）
+        void AddLine(Model3DGroup parent, Point3D a, Point3D b, double width, byte alpha)
+        {
+            var dx = b.X - a.X; var dz = b.Z - a.Z;
+            double len = Math.Sqrt(dx * dx + dz * dz);
+            if (len < 1e-6) return;
+            double nx = -dz / len * width * 0.5, nz = dx / len * width * 0.5;
+            double yy = a.Y + 0.0015;                 // 统一抬一点，防与地面 Z-fighting
+            var m = new MeshGeometry3D();
+            m.Positions.Add(new Point3D(a.X - nx, yy, a.Z - nz));
+            m.Positions.Add(new Point3D(a.X + nx, yy, a.Z + nz));
+            m.Positions.Add(new Point3D(b.X + nx, yy, b.Z + nz));
+            m.Positions.Add(new Point3D(b.X - nx, yy, b.Z - nz));
+            m.TriangleIndices.Add(0); m.TriangleIndices.Add(1); m.TriangleIndices.Add(2);
+            m.TriangleIndices.Add(0); m.TriangleIndices.Add(2); m.TriangleIndices.Add(3);
+            var brush = new SolidColorBrush(Color.FromArgb(alpha, 0x18, 0x2A, 0x40));
+            _floorLineBrushes.Add(brush);
+            parent.Children.Add(new GeometryModel3D(m, new DiffuseMaterial(brush)));
         }
 
         Model3DGroup BuildPet()
@@ -1361,6 +1700,7 @@ namespace DesktopPet
                 _clock += dt;
                 _stateTimer -= dt;
                 if (_pinTimer > 0) _pinTimer -= dt;   // 移动后钉住计时
+                TickPose(dt);                          // 姿态接管层：衰减计时 + 缓动
 
                 // FIX-GROUND：离地高度 / 落地弹簧形变 / 影子收缩
                 double h = Math.Max(0, _hop.OffsetY + _jump.OffsetY);
@@ -1402,12 +1742,9 @@ namespace DesktopPet
                     double ss = 1.0 - 0.35 * h;
                     _shadowScale.ScaleX = ss;
                     _shadowScale.ScaleZ = ss;
-                    for (int i = 0; i < _shadowBrushes.Length; i++)
-                    {
-                        byte a = (byte)(_shadowBaseA[i] * Math.Max(0.0, 1.0 - 0.6 * h));
-                        _shadowBrushes[i].Color = Color.FromArgb(a, 0, 0, 0);
-                    }
+                    RefreshShadow(h);
                 }
+                TickShadowBg(dt);
 
                 // 弹珠模式：自由飞行（撞壁反弹 + 摩擦减速）；飞行期间不让它自己走
                 if (_ballFlight) TickBallFlight(dt);
@@ -1431,9 +1768,11 @@ namespace DesktopPet
                 {
                     // 非行走状态：情绪姿态浮动（待机/情绪/打盹共用）
                     // FIX-GROUND P0-5：非负呼吸曲线（0→amp→0，两端导数为 0），负半周会把球底压进地里
-                    _hop.OffsetY = (1 - Math.Cos(_clock * _moodFloatFreq)) * 0.5 * _moodFloatAmp;
+                    // 呼吸曲线改用姿态层给的频率/幅度（没接管时就是情绪值）
+                    _hop.OffsetY = (1 - Math.Cos(_clock * _curPoseBreathFreq)) * 0.5 * _curPoseBreathAmp;
                     if (_hop.OffsetY < 0) _hop.OffsetY = 0;
-                    SetEyes(Blink(_clock) ? 0.15 : _moodEyes);
+                    double eyeNow = Blink(_clock) ? 0.15 : (double.IsNaN(_poseEye) ? _moodEyes : _curPoseEye);
+                    SetEyes(eyeNow);
 
                     // P0-6 Doze：偶尔冒 Zzz 气泡
                     if (_state == State.Doze)
@@ -1455,7 +1794,7 @@ namespace DesktopPet
 
                     // 待机时随机闲逛计时（钉住期/暂停期不闲逛）
                     if (_state == State.Idle && _stateTimer <= 0 &&
-                        _pinTimer <= 0 && !_paused && !_ballFlight)
+                        _pinTimer <= 0 && !_paused && !_ballFlight && _poseHold <= 0)
                         EnterWalk();
                 }
 
@@ -1473,6 +1812,7 @@ namespace DesktopPet
 
                 // P0-7 每帧吸附到当前屏幕工作区（显示器切换/拔插自动纠正）
                 ClampToWorkArea();
+                TickParallax();
             }
             catch (Exception ex)
             {
@@ -2033,7 +2373,7 @@ namespace DesktopPet
                 switch (path)
                 {
                     case "/":
-                        data = "{\"endpoints\":[\"GET /pet/port\",\"GET /status\",\"POST /pet/chat\",\"POST /pet/action\",\"POST /pet/visible\",\"POST /pet/move\",\"POST /pet/mood\",\"POST /pet/pause\",\"POST /pet/face\",\"POST /jump\",\"POST /walk?dir=1&seconds=5\",\"POST /idle\"]}";
+                        data = "{\"endpoints\":[\"GET /pet/port\",\"GET /status\",\"POST /pet/chat\",\"POST /pet/action\",\"POST /pet/visible\",\"POST /pet/move\",\"POST /pet/mood\",\"POST /pet/pose\",\"POST /pet/pause\",\"POST /pet/face\",\"POST /jump\",\"POST /walk?dir=1&seconds=5\",\"POST /idle\"]}";
                         break;
 
                     case "/pet/port":
@@ -2109,6 +2449,26 @@ namespace DesktopPet
                                 return;
                             }
                             data = "{\"mood\":\"" + mood.ToLowerInvariant() + "\"}";
+                        }
+                        break;
+
+                    case "/pet/pose":
+                        if (method != "POST") { code = 405; data = "{}"; break; }
+                        {
+                            var cmd = new PetWindow.PoseCmd();
+                            double v;
+                            if (TryExtractNumber(body, "eye", out v)) cmd.Eye = v;
+                            if (TryExtractNumber(body, "blush", out v)) cmd.Blush = v;
+                            if (TryExtractNumber(body, "yaw", out v)) cmd.Yaw = v;
+                            if (TryExtractNumber(body, "gazeX", out v)) cmd.GazeX = v;
+                            if (TryExtractNumber(body, "gazeY", out v)) cmd.GazeY = v;
+                            if (TryExtractNumber(body, "breathAmp", out v)) cmd.BreathAmp = v;
+                            if (TryExtractNumber(body, "breathFreq", out v)) cmd.BreathFreq = v;
+                            if (TryExtractNumber(body, "hold", out v)) cmd.Hold = v;
+                            cmd.Clear = ExtractBool(body, "clear", false);
+                            var c2 = cmd;
+                            _pet.Dispatcher.BeginInvoke(new Action(delegate { _pet.ApiPose(c2); }));
+                            data = "{\"pose\":\"ok\"}";
                         }
                         break;
 
@@ -2234,7 +2594,9 @@ namespace DesktopPet
                 McpTool("pet_face", "让桌宠转身面向镜头（yaw 归零），随后 1.5 秒内不闲逛",
                     "{\"type\":\"object\",\"properties\":{}}") + "," +
                 McpTool("pet_status", "查询桌宠状态（待机/行走、屏幕坐标、是否可见）",
-                    "{\"type\":\"object\",\"properties\":{}}") +
+                    "{\"type\":\"object\",\"properties\":{}}") + "," +
+                McpTool("pet_pose", "连续姿态注入：直接给眼睛开合/腮红/朝向/注视/呼吸（不填的项不改），hold 秒后自动还原。比 pet_mood 精细，用来做「看这边」「歪头」「睁大眼睛」这类活细节",
+                    "{\"type\":\"object\",\"properties\":{\"eye\":{\"type\":\"number\",\"description\":\"眼睛开合 0.05~1.4，1=正常\"},\"blush\":{\"type\":\"number\",\"description\":\"腮红 0~2.5，1=情绪默认\"},\"yaw\":{\"type\":\"number\",\"description\":\"朝向角 -24~24（超过五官会贴到球轮廓上），0=正面\"},\"gazeX\":{\"type\":\"number\",\"description\":\"瞳孔左右 -1~1\"},\"gazeY\":{\"type\":\"number\",\"description\":\"瞳孔上下 -1~1\"},\"breathAmp\":{\"type\":\"number\",\"description\":\"呼吸幅度 0~0.2\"},\"breathFreq\":{\"type\":\"number\",\"description\":\"呼吸频率 0.2~6\"},\"hold\":{\"type\":\"number\",\"description\":\"接管秒数，默认6，上限60\"},\"clear\":{\"type\":\"boolean\",\"description\":\"true=立刻放开接管\"}}}") +
                 "]}";
         }
 
@@ -2322,6 +2684,24 @@ namespace DesktopPet
                     _pet.Dispatcher.Invoke(new Action(() => _pet.FaceFrontCore(false)));
                     text = "已转身面向镜头";
                     break;
+                case "pet_pose":
+                    {
+                        var cmd = new PetWindow.PoseCmd();
+                        double v;
+                        if (TryExtractNumber(args, "eye", out v)) cmd.Eye = v;
+                        if (TryExtractNumber(args, "blush", out v)) cmd.Blush = v;
+                        if (TryExtractNumber(args, "yaw", out v)) cmd.Yaw = v;
+                        if (TryExtractNumber(args, "gazeX", out v)) cmd.GazeX = v;
+                        if (TryExtractNumber(args, "gazeY", out v)) cmd.GazeY = v;
+                        if (TryExtractNumber(args, "breathAmp", out v)) cmd.BreathAmp = v;
+                        if (TryExtractNumber(args, "breathFreq", out v)) cmd.BreathFreq = v;
+                        if (TryExtractNumber(args, "hold", out v)) cmd.Hold = v;
+                        cmd.Clear = ExtractBool(args, "clear", false);
+                        var c2 = cmd;
+                        _pet.Dispatcher.Invoke(new Action(delegate { _pet.ApiPose(c2); }));
+                        text = cmd.Clear ? "已放开姿态接管" : "姿态已注入，hold=" + cmd.Hold + "s";
+                        break;
+                    }
                 case "pet_status":
                     text = (string)_pet.Dispatcher.Invoke(new Func<string>(_pet.ApiStatus));
                     break;
