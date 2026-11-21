@@ -647,15 +647,15 @@ namespace DesktopPet
             public System.Windows.Shapes.Path Shape;
             public TextBlock Text;
             public TextBlock Tick;
-            public Brush[] Norm = new Brush[4];   // 每套样式一份常态填充
-            public Brush[] Hot = new Brush[4];    // 每套样式一份悬停填充
+            public Brush[] Norm = new Brush[StyleCount];   // 每套样式一份常态填充
+            public Brush[] Hot = new Brush[StyleCount];    // 每套样式一份悬停填充
         }
 
         const double RadialSize = 266;
         const double RadialOuter = 122;
         const double RadialInner = 74;
         const int RadialCount = 12;
-        const int StyleCount = 4;            // 0 彩格 / 1 金色法阵 / 2 星空 / 3 霓虹
+        const int StyleCount = 5;            // 0 彩格 / 1 金色法阵 / 2 星空 / 3 霓虹 / 4 星云
         const int HitChip = -2;              // 右下角"样式"按钮的命中码
         const double ChipOffX = 112;         // 相对圆心的偏移（DIP）
         const double ChipOffY = 112;
@@ -670,7 +670,10 @@ namespace DesktopPet
         Brush[] _textHot = new Brush[StyleCount];
         Brush[] _baseFill = new Brush[StyleCount];
         Brush[] _chipBorder = new Brush[StyleCount];
-        static readonly string[] StyleNames = new string[] { "彩格", "法阵", "星空", "霓虹" };
+        static readonly string[] StyleNames = new string[] { "彩格", "法阵", "星空", "霓虹", "星云" };
+
+        RotateTransform _nebulaSpin;         // 星云环的缓慢自转
+        int _underIndex = -1;                // 环带装饰插到扇区之下、文字之上的位置（否则会盖住文字）
 
         System.Windows.Controls.Primitives.Popup _radial;
         Canvas _radialCanvas;
@@ -748,16 +751,22 @@ namespace DesktopPet
             _textHot[2] = Brushes.White;
             _textNorm[3] = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xDD, 0xF5));
             _textHot[3] = Brushes.White;
+            _textNorm[4] = new SolidColorBrush(Color.FromArgb(0xFF, 0xE8, 0xEE, 0xFF));
+            _textHot[4] = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFA, 0xDC));
             _baseFill[0] = new SolidColorBrush(Color.FromArgb(0x8C, 0x33, 0x3B, 0x46));
             _baseFill[1] = new SolidColorBrush(Color.FromArgb(0xF8, 0x11, 0x0E, 0x07));
             var cosmicBg = new LinearGradientBrush(
                 Color.FromArgb(0xF8, 0x12, 0x16, 0x3C), Color.FromArgb(0xF8, 0x28, 0x11, 0x38), new Point(0, 0), new Point(1, 1));
             _baseFill[2] = cosmicBg;
             _baseFill[3] = new SolidColorBrush(Color.FromArgb(0xF0, 0x07, 0x05, 0x0D));
+            var nebulaBg = new LinearGradientBrush(
+                Color.FromArgb(0xF2, 0x0A, 0x10, 0x30), Color.FromArgb(0xF2, 0x2A, 0x0F, 0x3A), new Point(0, 0), new Point(1, 1));
+            _baseFill[4] = nebulaBg;
             _chipBorder[0] = new SolidColorBrush(Color.FromArgb(0x90, 0xFF, 0xFF, 0xFF));
             _chipBorder[1] = new SolidColorBrush(Color.FromArgb(0xC0, 0xFF, 0xCE, 0x7A));
             _chipBorder[2] = new SolidColorBrush(Color.FromArgb(0xC0, 0x9F, 0xD8, 0xFF));
             _chipBorder[3] = new SolidColorBrush(Color.FromArgb(0xC0, 0xFF, 0x58, 0xC8));
+            _chipBorder[4] = new SolidColorBrush(Color.FromArgb(0xC0, 0xA9, 0xC4, 0xFF));
 
             _radialCanvas = new Canvas { Width = RadialSize, Height = RadialSize, IsHitTestVisible = false, Background = Brushes.Transparent };
             double cx = RadialSize / 2.0, cy = RadialSize / 2.0;
@@ -788,6 +797,7 @@ namespace DesktopPet
             var baseDonut = new System.Windows.Shapes.Path { Data = baseGeo, Fill = new SolidColorBrush(Color.FromArgb(0x8C, 0x33, 0x3B, 0x46)) };
             _radialCanvas.Children.Add(baseDonut);
             _radialBase = baseDonut;
+            _underIndex = _radialCanvas.Children.Count;   // 之后插进来的环带画在这层：压住底盘、却被扇区和文字压住
 
             // 中间不再垫底、也不再写"取消"：圆洞里只留豆仔的脸（点洞中心 = 取消）
 
@@ -809,6 +819,7 @@ namespace DesktopPet
             BuildGoldDeco(cx, cy);
             BuildCosmicDeco(cx, cy);
             BuildNeonDeco(cx, cy);
+            BuildNebulaDeco(cx, cy);
             ApplyRadialStyle();
 
             _radial = new System.Windows.Controls.Primitives.Popup
@@ -866,6 +877,9 @@ namespace DesktopPet
                 (byte)(cosCol.B + (255 - cosCol.B) * 0.40)));
             norm[3] = new SolidColorBrush(Color.FromArgb(0x00, neonCol.R, neonCol.G, neonCol.B));
             hot[3] = new SolidColorBrush(Color.FromArgb(0x6F, neonCol.R, neonCol.G, neonCol.B));
+            // 星云：扇区常态全透明，只让 Ellipse 渐变环露出来；悬停浮一层淡金
+            norm[4] = new SolidColorBrush(Color.FromArgb(0x00, 0xFF, 0xF0, 0xC8));
+            hot[4] = new SolidColorBrush(Color.FromArgb(0x5E, 0xFF, 0xF0, 0xC8));
 
             var shape = new System.Windows.Shapes.Path
             {
@@ -1106,6 +1120,139 @@ namespace DesktopPet
                 };
                 AddDeco(3, ln);
             }
+        }
+
+        // 环带类装饰要压在底盘之上、扇区与文字之下，否则渐变环会把 12 个标签糊掉
+        void AddDecoUnder(int style, UIElement el)
+        {
+            if (_underIndex >= 0 && _underIndex <= _radialCanvas.Children.Count)
+            {
+                _radialCanvas.Children.Insert(_underIndex, el);
+                _underIndex++;
+            }
+            else _radialCanvas.Children.Add(el);
+            _decos[style].Add(el);
+        }
+
+        // 样式 4「星云」：Ellipse 环带（渐变描边 = 星云色）+ 缓慢自转，外面撒金色/冰蓝星芒，再挂一颗带环的小行星
+        void BuildNebulaDeco(double cx, double cy)
+        {
+            double rIn = RadialInner, rOut = RadialOuter;
+
+            // WPF 没有角度渐变（conic），这里用 180 片 2° 的细扇区拼成一圈、逐片插值颜色 = 真·绕圈星云
+            Color[] cols = new Color[]
+            {
+                Color.FromArgb(0xFF, 0x16, 0x30, 0x6E), Color.FromArgb(0xFF, 0x1D, 0x49, 0xB8),
+                Color.FromArgb(0xFF, 0x2E, 0x6B, 0xE0), Color.FromArgb(0xFF, 0x4A, 0x55, 0xD0),
+                Color.FromArgb(0xFF, 0x7B, 0x46, 0xC8), Color.FromArgb(0xFF, 0xB8, 0x4B, 0xC0),
+                Color.FromArgb(0xFF, 0xD6, 0x55, 0xA0), Color.FromArgb(0xFF, 0xB8, 0x5C, 0x86),
+                Color.FromArgb(0xFF, 0x3E, 0x5A, 0xAE), Color.FromArgb(0xFF, 0x16, 0x30, 0x6E)
+            };
+            double[] poss = new double[] { 0, 0.10, 0.22, 0.34, 0.46, 0.58, 0.68, 0.76, 0.86, 1.0 };
+
+            var bandCanvas = new Canvas { Width = RadialSize, Height = RadialSize, IsHitTestVisible = false };
+            int n = 180;
+            for (int i = 0; i < n; i++)
+            {
+                double t = i / (double)n;
+                Color c = ConicColor(cols, poss, t);
+                // 明暗起伏：让相邻几片有亮有暗，看起来像星云而不是一条死渐变
+                double k = 0.92 + 0.08 * Math.Sin(i * 0.30) + 0.04 * Math.Sin(i * 1.1 + 0.8);
+                c = Color.FromArgb(0xFF,
+                    (byte)Math.Min(255, (int)(c.R * k)),
+                    (byte)Math.Min(255, (int)(c.G * k)),
+                    (byte)Math.Min(255, (int)(c.B * k)));
+                double a0 = (i * 360.0 / n - 0.8) * Math.PI / 180.0;
+                double a1 = ((i + 1) * 360.0 / n + 0.8) * Math.PI / 180.0;
+                var p0 = new Point(cx + rOut * Math.Cos(a0), cy + rOut * Math.Sin(a0));
+                var p1 = new Point(cx + rOut * Math.Cos(a1), cy + rOut * Math.Sin(a1));
+                var p2 = new Point(cx + rIn * Math.Cos(a1), cy + rIn * Math.Sin(a1));
+                var p3 = new Point(cx + rIn * Math.Cos(a0), cy + rIn * Math.Sin(a0));
+                var fig = new PathFigure { StartPoint = p0, IsClosed = true, IsFilled = true };
+                fig.Segments.Add(new ArcSegment { Point = p1, Size = new Size(rOut, rOut), SweepDirection = SweepDirection.Clockwise });
+                fig.Segments.Add(new LineSegment { Point = p2 });
+                fig.Segments.Add(new ArcSegment { Point = p3, Size = new Size(rIn, rIn), SweepDirection = SweepDirection.Counterclockwise });
+                var geo = new PathGeometry();
+                geo.Figures.Add(fig);
+                bandCanvas.Children.Add(new System.Windows.Shapes.Path
+                {
+                    Data = geo,
+                    Fill = new SolidColorBrush(c),
+                    IsHitTestVisible = false
+                });
+            }
+            _nebulaSpin = new RotateTransform(0);
+            bandCanvas.RenderTransform = _nebulaSpin;
+            bandCanvas.RenderTransformOrigin = new Point(0.5, 0.5);
+            AddDecoUnder(4, bandCanvas);
+
+            MakeRing(4, cx, cy, RadialOuter + 13, 10, 0x2A, 0x6A, 0x7C, 0xFF);   // 外层幽蓝光晕
+            MakeRing(4, cx, cy, RadialOuter + 5, 1.6, 0x6A, 0xA9, 0xC4, 0xFF);  // 细亮环
+            MakeRing(4, cx, cy, RadialInner - 4, 1.4, 0x84, 0xC9, 0x7B, 0xE0);  // 内圈淡紫
+
+            // 圈外一圈固定位置的星芒，金的为主、掺几颗冰蓝的
+            double[] sAng = new double[] { -142, -118, -96, -62, -28, -6, 14, 34, 58, 78, 102, 122, 146, 168, -166 };
+            for (int i = 0; i < sAng.Length; i++)
+            {
+                double a = sAng[i] * Math.PI / 180.0;
+                double rr = RadialOuter + (i % 3 == 0 ? 21 : (i % 3 == 1 ? 11 : 27));
+                Color sc = (i % 4 == 0)
+                    ? Color.FromArgb(0xFF, 0x8F, 0xF0, 0xFF)
+                    : Color.FromArgb(0xFF, 0xFF, 0xD2, 0x4D);
+                MakeSparkle(4, cx, cy, cx + rr * Math.Cos(a), cy + rr * Math.Sin(a), i % 3 == 0 ? 8.5 : 5.5, sc);
+            }
+
+            // 左上一颗带土星环的小行星
+            double sa = -38.0 * Math.PI / 180.0;
+            double sr = RadialOuter + 15;
+            double px = cx + sr * Math.Cos(sa), py = cy + sr * Math.Sin(sa);
+            var planet = new System.Windows.Shapes.Ellipse
+            {
+                Width = 14,
+                Height = 14,
+                Fill = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xD9, 0x8A)),
+                Stroke = new SolidColorBrush(Color.FromArgb(0xAA, 0xFF, 0xF3, 0xC4)),
+                StrokeThickness = 0.8,
+                IsHitTestVisible = false
+            };
+            Canvas.SetLeft(planet, px - 7);
+            Canvas.SetTop(planet, py - 7);
+            AddDeco(4, planet);
+
+            var pring = new System.Windows.Shapes.Ellipse
+            {
+                Width = 30,
+                Height = 9,
+                Fill = null,
+                Stroke = new SolidColorBrush(Color.FromArgb(0xC0, 0xFF, 0xE0, 0x9A)),
+                StrokeThickness = 1.6,
+                IsHitTestVisible = false
+            };
+            pring.RenderTransform = new RotateTransform(-18);
+            pring.RenderTransformOrigin = new Point(0.5, 0.5);
+            Canvas.SetLeft(pring, px - 15);
+            Canvas.SetTop(pring, py - 4.5);
+            AddDeco(4, pring);
+        }
+
+        // 按位置在一组停靠点上插值颜色（给"角度渐变"用）
+        Color ConicColor(Color[] cols, double[] poss, double t)
+        {
+            t = ((t % 1.0) + 1.0) % 1.0;
+            for (int i = 1; i < poss.Length; i++)
+            {
+                if (t <= poss[i])
+                {
+                    double f = (t - poss[i - 1]) / Math.Max(1e-6, poss[i] - poss[i - 1]);
+                    Color a = cols[i - 1], b = cols[i];
+                    return Color.FromArgb(
+                        (byte)(a.A + (b.A - a.A) * f),
+                        (byte)(a.R + (b.R - a.R) * f),
+                        (byte)(a.G + (b.G - a.G) * f),
+                        (byte)(a.B + (b.B - a.B) * f));
+                }
+            }
+            return cols[cols.Length - 1];
         }
 
         void ApplyRadialStyle()
@@ -1374,11 +1521,13 @@ namespace DesktopPet
             bool near = Math.Abs(p.X - _radialCx) < RadialOuter + 14 && Math.Abs(p.Y - _radialCy) < RadialOuter + 14;
             _flowPhase = (_flowPhase + (near ? 0.4 : 0.2)) % RadialCount;   // 0.2 格/帧 ≈ 3.6 秒转一圈
             int s = _radialStyle;
+            if (s == 4 && _nebulaSpin != null)
+                _nebulaSpin.Angle = (_nebulaSpin.Angle + (near ? 1.0 : 0.5)) % 360;   // 星云慢转：约 43 秒一圈，悬停快一倍
             for (int i = 0; i < _radialItems.Count; i++)
             {
                 var it = _radialItems[i];
                 if (i == _radialHover) { it.Shape.Fill = it.Hot[s]; it.Hot[s].Opacity = 1.0; continue; }
-                if (s == 1) { it.Shape.Fill = it.Norm[s]; it.Norm[s].Opacity = 1.0; continue; }  // 法阵保持干净的金环，不上流动色
+                if (s == 1 || s == 4) { it.Shape.Fill = it.Norm[s]; it.Norm[s].Opacity = 1.0; continue; }  // 法阵/星云：扇区不吃流动色
                 double d = i - _flowPhase;
                 d = ((d % RadialCount) + RadialCount) % RadialCount;
                 double w = d < 4 ? (1.0 - d / 4.0) : 0.0;   // 头亮，尾四格渐弱
