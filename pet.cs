@@ -647,12 +647,25 @@ namespace DesktopPet
             public TextBlock Tick;
             public Brush FillNorm;
             public Brush FillHot;
+            public Brush FillNormG;   // 金色法阵样式：常态透明
+            public Brush FillHotG;    // 金色法阵样式：悬停金雾
         }
 
         const double RadialSize = 266;
         const double RadialOuter = 122;
         const double RadialInner = 74;
         const int RadialCount = 12;
+        const int HitChip = -2;              // 右下角"样式"按钮的命中码
+        const double ChipOffX = 112;         // 相对圆心的偏移（DIP）
+        const double ChipOffY = 112;
+
+        int _radialStyle = 1;                // 0 = 彩色扇区，1 = 金色法阵（默认走法阵）
+        List<UIElement> _goldDecos = new List<UIElement>();
+        System.Windows.Shapes.Ellipse _radialRing;
+        System.Windows.Shapes.Path _radialBase;
+        Border _radialChip;
+        TextBlock _radialChipText;
+        Brush _goldTextNorm, _goldTextHot, _goldDarkFill;
 
         System.Windows.Controls.Primitives.Popup _radial;
         Canvas _radialCanvas;
@@ -688,6 +701,9 @@ namespace DesktopPet
             _radialFillHot = new SolidColorBrush(Color.FromArgb(0xE8, 0x77, 0xCB, 0xFF));
             _radialTextNorm = Brushes.White;
             _radialTextHot = Brushes.White;
+            _goldTextNorm = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xE6, 0xAE));
+            _goldTextHot = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFD, 0xF2));
+            _goldDarkFill = new SolidColorBrush(Color.FromArgb(0xF8, 0x11, 0x0E, 0x07));
 
             _radialCanvas = new Canvas { Width = RadialSize, Height = RadialSize, IsHitTestVisible = false, Background = Brushes.Transparent };
             double cx = RadialSize / 2.0, cy = RadialSize / 2.0;
@@ -703,6 +719,7 @@ namespace DesktopPet
             Canvas.SetLeft(ring, cx - RadialOuter - 4);
             Canvas.SetTop(ring, cy - RadialOuter - 4);
             _radialCanvas.Children.Add(ring);
+            _radialRing = ring;
 
             // 底盘：扇区之间留了缝，没有这层深色垫底，缝里会露出下面的桌面文字（很脏）
             var baseGeo = new PathGeometry { FillRule = FillRule.EvenOdd };
@@ -716,6 +733,7 @@ namespace DesktopPet
             baseGeo.Figures.Add(fIn);
             var baseDonut = new System.Windows.Shapes.Path { Data = baseGeo, Fill = new SolidColorBrush(Color.FromArgb(0x8C, 0x33, 0x3B, 0x46)) };
             _radialCanvas.Children.Add(baseDonut);
+            _radialBase = baseDonut;
 
             // 中间不再垫底、也不再写"取消"：圆洞里只留豆仔的脸（点洞中心 = 取消）
 
@@ -732,6 +750,10 @@ namespace DesktopPet
             AddRadialItem(9, "自启", delegate { ToggleAutoStart(); }, delegate { return AutoStart.IsEnabled(); }, null);
             AddRadialItem(10, "隐藏", delegate { ApiSetVisible(false); }, null, null);
             AddRadialItem(11, "退出", delegate { Close(); }, null, null);
+
+            BuildChip(cx, cy);
+            BuildGoldDeco(cx, cy);
+            ApplyRadialStyle();
 
             _radial = new System.Windows.Controls.Primitives.Popup
             {
@@ -772,6 +794,9 @@ namespace DesktopPet
                 (byte)(baseCol.R + (255 - baseCol.R) * 0.22),
                 (byte)(baseCol.G + (255 - baseCol.G) * 0.22),
                 (byte)(baseCol.B + (255 - baseCol.B) * 0.22)));
+            // 金色法阵样式：格子本身不上色（让深底透出来），悬停时浮一层金雾
+            var fillNormG = new SolidColorBrush(Color.FromArgb(0x00, 0xFF, 0xD9, 0x7A));
+            var fillHotG = new SolidColorBrush(Color.FromArgb(0xA6, 0xFF, 0xD0, 0x6A));
 
             var shape = new System.Windows.Shapes.Path
             {
@@ -812,10 +837,132 @@ namespace DesktopPet
             Canvas.SetTop(tick, cy + rt * Math.Sin(mid * Math.PI / 180.0) - 5);
             _radialCanvas.Children.Add(tick);
 
-            _radialItems.Add(new RadialItem { Label = label, Run = run, IsOn = isOn, DynLabel = dyn, Shape = shape, Text = text, Tick = tick, FillNorm = fillNorm, FillHot = fillHot });
+            _radialItems.Add(new RadialItem { Label = label, Run = run, IsOn = isOn, DynLabel = dyn, Shape = shape, Text = text, Tick = tick, FillNorm = fillNorm, FillHot = fillHot, FillNormG = fillNormG, FillHotG = fillHotG });
         }
 
         bool IsDoze() { return _state == State.Doze; }
+
+        void BuildChip(double cx, double cy)
+        {
+            _radialChipText = new TextBlock
+            {
+                Text = "样式",
+                FontSize = 10,
+                FontFamily = new FontFamily("Microsoft YaHei UI"),
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _radialChip = new Border
+            {
+                Width = 42,
+                Height = 20,
+                CornerRadius = new CornerRadius(10),
+                Background = new SolidColorBrush(Color.FromArgb(0xB4, 0x1A, 0x18, 0x14)),
+                BorderThickness = new Thickness(1),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(0x90, 0xFF, 0xFF, 0xFF)),
+                Child = _radialChipText
+            };
+            Canvas.SetLeft(_radialChip, cx + ChipOffX - 21);
+            Canvas.SetTop(_radialChip, cy + ChipOffY - 10);
+            _radialCanvas.Children.Add(_radialChip);
+        }
+
+        // 金色法阵的装饰层：发光圈 + 刻度 + 尖角（只在法阵样式里显示）
+        void AddGoldRing(double cx, double cy, double r, double thick, byte alpha, byte rr, byte gg, byte bb)
+        {
+            var e = new System.Windows.Shapes.Ellipse
+            {
+                Width = r * 2,
+                Height = r * 2,
+                Fill = null,
+                Stroke = new SolidColorBrush(Color.FromArgb(alpha, rr, gg, bb)),
+                StrokeThickness = thick
+            };
+            Canvas.SetLeft(e, cx - r);
+            Canvas.SetTop(e, cy - r);
+            _radialCanvas.Children.Add(e);
+            _goldDecos.Add(e);
+        }
+
+        void BuildGoldDeco(double cx, double cy)
+        {
+            AddGoldRing(cx, cy, RadialOuter + 18, 7, 0x2E, 0xFF, 0xC0, 0x50);
+            AddGoldRing(cx, cy, RadialOuter + 11, 3.5, 0x58, 0xFF, 0xD2, 0x7C);
+            AddGoldRing(cx, cy, RadialOuter + 2.5, 2, 0xEE, 0xFF, 0xDE, 0xA4);
+            AddGoldRing(cx, cy, RadialInner - 3, 1.5, 0xBE, 0xFF, 0xDE, 0xA4);
+
+            for (int i = 0; i < 48; i++)
+            {
+                double a = i * 7.5 * Math.PI / 180.0;
+                double r1 = RadialOuter + 4.5;
+                double r2 = (i % 6 == 0) ? RadialOuter + 12 : RadialOuter + 8;
+                var ln = new System.Windows.Shapes.Line
+                {
+                    X1 = cx + r1 * Math.Cos(a), Y1 = cy + r1 * Math.Sin(a),
+                    X2 = cx + r2 * Math.Cos(a), Y2 = cy + r2 * Math.Sin(a),
+                    Stroke = new SolidColorBrush(Color.FromArgb(0x9A, 0xFF, 0xD8, 0x8E)),
+                    StrokeThickness = 1
+                };
+                _radialCanvas.Children.Add(ln);
+                _goldDecos.Add(ln);
+            }
+
+            for (int i = 0; i < 8; i++)
+            {
+                double a = i * 45.0 * Math.PI / 180.0;
+                double nx = Math.Cos(a), ny = Math.Sin(a);
+                double px = -ny, py = nx;
+                var fig = new PathFigure
+                {
+                    StartPoint = new Point(cx + (RadialOuter + 4) * nx + 4.5 * px, cy + (RadialOuter + 4) * ny + 4.5 * py),
+                    IsClosed = true
+                };
+                fig.Segments.Add(new LineSegment { Point = new Point(cx + (RadialOuter + 21) * nx, cy + (RadialOuter + 21) * ny) });
+                fig.Segments.Add(new LineSegment { Point = new Point(cx + (RadialOuter + 4) * nx - 4.5 * px, cy + (RadialOuter + 4) * ny - 4.5 * py) });
+                var geo = new PathGeometry();
+                geo.Figures.Add(fig);
+                var spike = new System.Windows.Shapes.Path { Data = geo, Fill = new SolidColorBrush(Color.FromArgb(0xA8, 0xFF, 0xCE, 0x66)) };
+                _radialCanvas.Children.Add(spike);
+                _goldDecos.Add(spike);
+            }
+        }
+
+        void ApplyRadialStyle()
+        {
+            bool gold = _radialStyle == 1;
+            if (_radialBase != null)
+                _radialBase.Fill = gold ? _goldDarkFill : new SolidColorBrush(Color.FromArgb(0x8C, 0x33, 0x3B, 0x46));
+            if (_radialRing != null)
+                _radialRing.Stroke = gold ? Brushes.Transparent : new SolidColorBrush(Color.FromArgb(0x66, 0xFF, 0xFF, 0xFF));
+            var vis = gold ? Visibility.Visible : Visibility.Collapsed;
+            for (int i = 0; i < _goldDecos.Count; i++) _goldDecos[i].Visibility = vis;
+            if (_radialChip != null)
+            {
+                _radialChip.BorderBrush = new SolidColorBrush(gold
+                    ? Color.FromArgb(0xC0, 0xFF, 0xCE, 0x7A)
+                    : Color.FromArgb(0x90, 0xFF, 0xFF, 0xFF));
+                _radialChipText.Foreground = gold ? _goldTextNorm : Brushes.White;
+                _radialChip.Background = gold
+                    ? new SolidColorBrush(Color.FromArgb(0xC8, 0x16, 0x12, 0x08))
+                    : new SolidColorBrush(Color.FromArgb(0xB4, 0x1A, 0x18, 0x14));
+            }
+            if (_radialItems != null)
+            {
+                for (int i = 0; i < _radialItems.Count; i++)
+                    _radialItems[i].Tick.Foreground = gold
+                        ? new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xDC, 0x96))
+                        : Brushes.White;
+            }
+            ApplyRadialHover();
+        }
+
+        void ToggleRadialStyle()
+        {
+            _radialStyle = (_radialStyle + 1) % 2;
+            ApplyRadialStyle();
+            Log.Write("radial style=" + _radialStyle);
+        }
 
         void ToggleDoze()
         {
@@ -909,6 +1056,7 @@ namespace DesktopPet
         {
             var p = CursorDip();
             double dx = p.X - _radialCx, dy = p.Y - _radialCy;
+            if (Math.Abs(dx - ChipOffX) < 23 && Math.Abs(dy - ChipOffY) < 12) return HitChip;   // 右下角"样式"按钮
             double r = Math.Sqrt(dx * dx + dy * dy);
             if (r < RadialInner || r > RadialOuter) return -1;
             double ang = Math.Atan2(dy, dx) * 180.0 / Math.PI;      // 0 = 正右
@@ -931,17 +1079,33 @@ namespace DesktopPet
         void ApplyRadialHover()
         {
             if (_radialItems == null) return;
-            var strokeNorm = new SolidColorBrush(Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF));
-            var strokeHot = new SolidColorBrush(Color.FromArgb(0xEE, 0xFF, 0xFF, 0xFF));
+            bool gold = _radialStyle == 1;
+            var strokeNorm = new SolidColorBrush(gold
+                ? Color.FromArgb(0x14, 0xFF, 0xD0, 0x80)
+                : Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF));
+            var strokeHot = new SolidColorBrush(gold
+                ? Color.FromArgb(0xFF, 0xFF, 0xE2, 0xAC)
+                : Color.FromArgb(0xEE, 0xFF, 0xFF, 0xFF));
             for (int i = 0; i < _radialItems.Count; i++)
             {
                 var it = _radialItems[i];
                 bool hot = (i == _radialHover);
-                it.Shape.Fill = hot ? it.FillHot : it.FillNorm;
+                it.Shape.Fill = hot
+                    ? (gold ? it.FillHotG : it.FillHot)
+                    : (gold ? it.FillNormG : it.FillNorm);
                 it.Shape.Stroke = hot ? strokeHot : strokeNorm;
                 it.Shape.StrokeThickness = hot ? 2 : 1;
-                it.Text.Foreground = hot ? _radialTextHot : _radialTextNorm;
+                it.Text.Foreground = gold
+                    ? (hot ? _goldTextHot : _goldTextNorm)
+                    : (hot ? _radialTextHot : _radialTextNorm);
                 it.Text.FontWeight = hot ? FontWeights.Bold : FontWeights.SemiBold;
+            }
+            if (_radialChip != null)
+            {
+                bool chipHot = (_radialHover == HitChip);
+                _radialChip.Opacity = chipHot ? 1.0 : 0.92;
+                _radialChip.BorderThickness = new Thickness(chipHot ? 2 : 1);
+                _radialChipText.FontWeight = chipHot ? FontWeights.Bold : FontWeights.Normal;
             }
         }
 
@@ -978,6 +1142,7 @@ namespace DesktopPet
         {
             if (!_radialOpen) return;
             UpdateRadialHover();
+            if (_radialHover == HitChip) { ToggleRadialStyle(); e.Handled = true; return; }
             if (_radialHover >= 0 && _radialMoveMax > 10) RunRadialItem();
             else if (_radialMoveMax <= 10) { /* 只点了一下：保持展开，等左键点选 */ }
             else CloseRadial();
@@ -2546,7 +2711,8 @@ namespace DesktopPet
             if (_radialOpen)
             {
                 UpdateRadialHover();
-                if (_radialHover >= 0) RunRadialItem();
+                if (_radialHover == HitChip) ToggleRadialStyle();
+                else if (_radialHover >= 0) RunRadialItem();
                 else CloseRadial();
                 e.Handled = true;
                 return;
