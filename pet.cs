@@ -645,27 +645,30 @@ namespace DesktopPet
             public System.Windows.Shapes.Path Shape;
             public TextBlock Text;
             public TextBlock Tick;
-            public Brush FillNorm;
-            public Brush FillHot;
-            public Brush FillNormG;   // 金色法阵样式：常态透明
-            public Brush FillHotG;    // 金色法阵样式：悬停金雾
+            public Brush[] Norm = new Brush[4];   // 每套样式一份常态填充
+            public Brush[] Hot = new Brush[4];    // 每套样式一份悬停填充
         }
 
         const double RadialSize = 266;
         const double RadialOuter = 122;
         const double RadialInner = 74;
         const int RadialCount = 12;
+        const int StyleCount = 4;            // 0 彩格 / 1 金色法阵 / 2 星空 / 3 霓虹
         const int HitChip = -2;              // 右下角"样式"按钮的命中码
         const double ChipOffX = 112;         // 相对圆心的偏移（DIP）
         const double ChipOffY = 112;
 
-        int _radialStyle = 1;                // 0 = 彩色扇区，1 = 金色法阵（默认走法阵）
-        List<UIElement> _goldDecos = new List<UIElement>();
+        int _radialStyle = 1;                // 默认走金色法阵
+        List<UIElement>[] _decos = new List<UIElement>[StyleCount];
         System.Windows.Shapes.Ellipse _radialRing;
         System.Windows.Shapes.Path _radialBase;
         Border _radialChip;
         TextBlock _radialChipText;
-        Brush _goldTextNorm, _goldTextHot, _goldDarkFill;
+        Brush[] _textNorm = new Brush[StyleCount];
+        Brush[] _textHot = new Brush[StyleCount];
+        Brush[] _baseFill = new Brush[StyleCount];
+        Brush[] _chipBorder = new Brush[StyleCount];
+        static readonly string[] StyleNames = new string[] { "彩格", "法阵", "星空", "霓虹" };
 
         System.Windows.Controls.Primitives.Popup _radial;
         Canvas _radialCanvas;
@@ -675,7 +678,6 @@ namespace DesktopPet
         double _radialMoveMax;
         Point _radialDownScreen;
         double _radialCx, _radialCy;
-        Brush _radialFillNorm, _radialFillHot, _radialTextNorm, _radialTextHot;
         ContextMenu _menuFallback;
 
         // 12 格各自的底色（跟着功能区分配：动作类偏暖，系统类偏冷，隐藏灰、退出红）
@@ -695,15 +697,61 @@ namespace DesktopPet
             Color.FromArgb(0xFF, 0xC8, 0x43, 0x3F)    // 11 退出 红
         };
 
+        // 星空样式：深蓝紫星云里的一圈冷色扇区，偶尔掺两颗暖星
+        static readonly Color[] CosmicColors = new Color[]
+        {
+            Color.FromArgb(0xFF, 0x33, 0x5C, 0xC4),   // 0 说话  宝蓝
+            Color.FromArgb(0xFF, 0x27, 0x4B, 0x9E),   // 1 弹跳  深蓝
+            Color.FromArgb(0xFF, 0x2C, 0x3D, 0x88),   // 2 摇头  靛
+            Color.FromArgb(0xFF, 0x4A, 0x35, 0x96),   // 3 转圈  紫
+            Color.FromArgb(0xFF, 0x6B, 0x3C, 0x9B),   // 4 害羞  紫红
+            Color.FromArgb(0xFF, 0x7E, 0x3F, 0x8A),   // 5 睡眠  梅红
+            Color.FromArgb(0xFF, 0x9C, 0x55, 0x4E),   // 6 魔法球 暖棕红
+            Color.FromArgb(0xFF, 0xB0, 0x7A, 0x3E),   // 7 暂停  金褐
+            Color.FromArgb(0xFF, 0x3E, 0x6C, 0xB2),   // 8 跟随  湖蓝
+            Color.FromArgb(0xFF, 0x2B, 0x61, 0xA8),   // 9 自启  深湖蓝
+            Color.FromArgb(0xFF, 0x2A, 0x36, 0x5E),   // 10 隐藏 夜灰蓝
+            Color.FromArgb(0xFF, 0x7C, 0x35, 0x58)    // 11 退出 暗酒红
+        };
+
+        // 霓虹样式：常态全透明，悬停浮一层青或粉的光
+        static readonly Color[] NeonColors = new Color[]
+        {
+            Color.FromArgb(0xFF, 0x3F, 0xD8, 0xFF),   // 0 说话  青
+            Color.FromArgb(0xFF, 0xFF, 0x58, 0xC8),   // 1 弹跳  粉
+            Color.FromArgb(0xFF, 0x3F, 0xD8, 0xFF),   // 2 摇头  青
+            Color.FromArgb(0xFF, 0xFF, 0x58, 0xC8),   // 3 转圈  粉
+            Color.FromArgb(0xFF, 0x3F, 0xD8, 0xFF),   // 4 害羞  青
+            Color.FromArgb(0xFF, 0xFF, 0x58, 0xC8),   // 5 睡眠  粉
+            Color.FromArgb(0xFF, 0x3F, 0xD8, 0xFF),   // 6 魔法球 青
+            Color.FromArgb(0xFF, 0xFF, 0x58, 0xC8),   // 7 暂停  粉
+            Color.FromArgb(0xFF, 0x3F, 0xD8, 0xFF),   // 8 跟随  青
+            Color.FromArgb(0xFF, 0xFF, 0x58, 0xC8),   // 9 自启  粉
+            Color.FromArgb(0xFF, 0x3F, 0xD8, 0xFF),   // 10 隐藏 青
+            Color.FromArgb(0xFF, 0xFF, 0x58, 0xC8)    // 11 退出 粉
+        };
+
         void BuildRadial()
         {
-            _radialFillNorm = new SolidColorBrush(Color.FromArgb(0xB4, 0x2C, 0x5F, 0x9B));
-            _radialFillHot = new SolidColorBrush(Color.FromArgb(0xE8, 0x77, 0xCB, 0xFF));
-            _radialTextNorm = Brushes.White;
-            _radialTextHot = Brushes.White;
-            _goldTextNorm = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xE6, 0xAE));
-            _goldTextHot = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFD, 0xF2));
-            _goldDarkFill = new SolidColorBrush(Color.FromArgb(0xF8, 0x11, 0x0E, 0x07));
+            for (int s = 0; s < StyleCount; s++) _decos[s] = new List<UIElement>();
+            _textNorm[0] = Brushes.White;
+            _textHot[0] = Brushes.White;
+            _textNorm[1] = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xE6, 0xAE));
+            _textHot[1] = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFD, 0xF2));
+            _textNorm[2] = new SolidColorBrush(Color.FromArgb(0xFF, 0xE6, 0xF1, 0xFF));
+            _textHot[2] = Brushes.White;
+            _textNorm[3] = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xDD, 0xF5));
+            _textHot[3] = Brushes.White;
+            _baseFill[0] = new SolidColorBrush(Color.FromArgb(0x8C, 0x33, 0x3B, 0x46));
+            _baseFill[1] = new SolidColorBrush(Color.FromArgb(0xF8, 0x11, 0x0E, 0x07));
+            var cosmicBg = new LinearGradientBrush(
+                Color.FromArgb(0xF8, 0x12, 0x16, 0x3C), Color.FromArgb(0xF8, 0x28, 0x11, 0x38), new Point(0, 0), new Point(1, 1));
+            _baseFill[2] = cosmicBg;
+            _baseFill[3] = new SolidColorBrush(Color.FromArgb(0xF0, 0x07, 0x05, 0x0D));
+            _chipBorder[0] = new SolidColorBrush(Color.FromArgb(0x90, 0xFF, 0xFF, 0xFF));
+            _chipBorder[1] = new SolidColorBrush(Color.FromArgb(0xC0, 0xFF, 0xCE, 0x7A));
+            _chipBorder[2] = new SolidColorBrush(Color.FromArgb(0xC0, 0x9F, 0xD8, 0xFF));
+            _chipBorder[3] = new SolidColorBrush(Color.FromArgb(0xC0, 0xFF, 0x58, 0xC8));
 
             _radialCanvas = new Canvas { Width = RadialSize, Height = RadialSize, IsHitTestVisible = false, Background = Brushes.Transparent };
             double cx = RadialSize / 2.0, cy = RadialSize / 2.0;
@@ -753,6 +801,8 @@ namespace DesktopPet
 
             BuildChip(cx, cy);
             BuildGoldDeco(cx, cy);
+            BuildCosmicDeco(cx, cy);
+            BuildNeonDeco(cx, cy);
             ApplyRadialStyle();
 
             _radial = new System.Windows.Controls.Primitives.Popup
@@ -787,21 +837,34 @@ namespace DesktopPet
             var geo = new PathGeometry();
             geo.Figures.Add(fig);
 
-            // 每格一种颜色（参照第三张图的八色扇区）：常态半透明，悬停整块提亮
+            // 每套样式一张色表：彩格用满色，法阵不上色只留金雾，星空用星云冷色，霓虹悬停才透光
             Color baseCol = RadialColors[index % RadialColors.Length];
-            var fillNorm = new SolidColorBrush(Color.FromArgb(0xDE, baseCol.R, baseCol.G, baseCol.B));
-            var fillHot = new SolidColorBrush(Color.FromArgb(0xFF,
+            Color cosCol = CosmicColors[index % CosmicColors.Length];
+            Color neonCol = NeonColors[index % NeonColors.Length];
+            var norm = new Brush[StyleCount];
+            var hot = new Brush[StyleCount];
+            norm[0] = new SolidColorBrush(Color.FromArgb(0xDE, baseCol.R, baseCol.G, baseCol.B));
+            hot[0] = new SolidColorBrush(Color.FromArgb(0xFF,
                 (byte)(baseCol.R + (255 - baseCol.R) * 0.22),
                 (byte)(baseCol.G + (255 - baseCol.G) * 0.22),
                 (byte)(baseCol.B + (255 - baseCol.B) * 0.22)));
-            // 金色法阵样式：格子本身不上色（让深底透出来），悬停时浮一层金雾
-            var fillNormG = new SolidColorBrush(Color.FromArgb(0x00, 0xFF, 0xD9, 0x7A));
-            var fillHotG = new SolidColorBrush(Color.FromArgb(0xA6, 0xFF, 0xD0, 0x6A));
+            norm[1] = new SolidColorBrush(Color.FromArgb(0x00, 0xFF, 0xD9, 0x7A));
+            hot[1] = new SolidColorBrush(Color.FromArgb(0xA6, 0xFF, 0xD0, 0x6A));
+            norm[2] = new SolidColorBrush(Color.FromArgb(0xE0,
+                (byte)(cosCol.R + (255 - cosCol.R) * 0.10),
+                (byte)(cosCol.G + (255 - cosCol.G) * 0.10),
+                (byte)(cosCol.B + (255 - cosCol.B) * 0.10)));
+            hot[2] = new SolidColorBrush(Color.FromArgb(0xFF,
+                (byte)(cosCol.R + (255 - cosCol.R) * 0.40),
+                (byte)(cosCol.G + (255 - cosCol.G) * 0.40),
+                (byte)(cosCol.B + (255 - cosCol.B) * 0.40)));
+            norm[3] = new SolidColorBrush(Color.FromArgb(0x00, neonCol.R, neonCol.G, neonCol.B));
+            hot[3] = new SolidColorBrush(Color.FromArgb(0x6F, neonCol.R, neonCol.G, neonCol.B));
 
             var shape = new System.Windows.Shapes.Path
             {
                 Data = geo,
-                Fill = fillNorm,
+                Fill = norm[1],
                 Stroke = new SolidColorBrush(Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF)),
                 StrokeThickness = 1
             };
@@ -837,7 +900,7 @@ namespace DesktopPet
             Canvas.SetTop(tick, cy + rt * Math.Sin(mid * Math.PI / 180.0) - 5);
             _radialCanvas.Children.Add(tick);
 
-            _radialItems.Add(new RadialItem { Label = label, Run = run, IsOn = isOn, DynLabel = dyn, Shape = shape, Text = text, Tick = tick, FillNorm = fillNorm, FillHot = fillHot, FillNormG = fillNormG, FillHotG = fillHotG });
+            _radialItems.Add(new RadialItem { Label = label, Run = run, IsOn = isOn, DynLabel = dyn, Shape = shape, Text = text, Tick = tick, Norm = norm, Hot = hot });
         }
 
         bool IsDoze() { return _state == State.Doze; }
@@ -868,8 +931,14 @@ namespace DesktopPet
             _radialCanvas.Children.Add(_radialChip);
         }
 
-        // 金色法阵的装饰层：发光圈 + 刻度 + 尖角（只在法阵样式里显示）
-        void AddGoldRing(double cx, double cy, double r, double thick, byte alpha, byte rr, byte gg, byte bb)
+        // 装饰层统一登记到某一套样式的列表里，切换样式时成组显隐
+        void AddDeco(int style, UIElement el)
+        {
+            _radialCanvas.Children.Add(el);
+            _decos[style].Add(el);
+        }
+
+        UIElement MakeRing(int style, double cx, double cy, double r, double thick, byte alpha, byte rr, byte gg, byte bb)
         {
             var e = new System.Windows.Shapes.Ellipse
             {
@@ -881,16 +950,66 @@ namespace DesktopPet
             };
             Canvas.SetLeft(e, cx - r);
             Canvas.SetTop(e, cy - r);
-            _radialCanvas.Children.Add(e);
-            _goldDecos.Add(e);
+            AddDeco(style, e);
+            return e;
+        }
+
+        // 四角星芒（星空样式的星星）：8 个点，外圈尖、内圈收
+        UIElement MakeSparkle(int style, double cx, double cy, double x, double y, double size, Color col)
+        {
+            var fig = new PathFigure { IsClosed = true, IsFilled = true };
+            for (int k = 0; k < 8; k++)
+            {
+                double ang = (-90.0 + k * 45.0) * Math.PI / 180.0;
+                double rr = (k % 2 == 0) ? size : size * 0.18;
+                var pt = new Point(x + rr * Math.Cos(ang), y + rr * Math.Sin(ang));
+                if (k == 0) fig.StartPoint = pt;
+                else fig.Segments.Add(new LineSegment { Point = pt });
+            }
+            var geo = new PathGeometry();
+            geo.Figures.Add(fig);
+            var star = new System.Windows.Shapes.Path
+            {
+                Data = geo,
+                Fill = new SolidColorBrush(col),
+                IsHitTestVisible = false
+            };
+            AddDeco(style, star);
+            return star;
+        }
+
+        // 霓虹样式的发光弧
+        void AddArc(int style, double cx, double cy, double r, double fromDeg, double toDeg, double thick, byte alpha, byte rr, byte gg, byte bb)
+        {
+            double a0 = fromDeg * Math.PI / 180.0, a1 = toDeg * Math.PI / 180.0;
+            var p0 = new Point(cx + r * Math.Cos(a0), cy + r * Math.Sin(a0));
+            var p1 = new Point(cx + r * Math.Cos(a1), cy + r * Math.Sin(a1));
+            var fig = new PathFigure { StartPoint = p0, IsClosed = false };
+            fig.Segments.Add(new ArcSegment
+            {
+                Point = p1,
+                Size = new Size(r, r),
+                SweepDirection = SweepDirection.Clockwise
+            });
+            var geo = new PathGeometry();
+            geo.Figures.Add(fig);
+            var arc = new System.Windows.Shapes.Path
+            {
+                Data = geo,
+                Fill = null,
+                Stroke = new SolidColorBrush(Color.FromArgb(alpha, rr, gg, bb)),
+                StrokeThickness = thick,
+                IsHitTestVisible = false
+            };
+            AddDeco(style, arc);
         }
 
         void BuildGoldDeco(double cx, double cy)
         {
-            AddGoldRing(cx, cy, RadialOuter + 18, 7, 0x2E, 0xFF, 0xC0, 0x50);
-            AddGoldRing(cx, cy, RadialOuter + 11, 3.5, 0x58, 0xFF, 0xD2, 0x7C);
-            AddGoldRing(cx, cy, RadialOuter + 2.5, 2, 0xEE, 0xFF, 0xDE, 0xA4);
-            AddGoldRing(cx, cy, RadialInner - 3, 1.5, 0xBE, 0xFF, 0xDE, 0xA4);
+            MakeRing(1, cx, cy, RadialOuter + 18, 7, 0x2E, 0xFF, 0xC0, 0x50);
+            MakeRing(1, cx, cy, RadialOuter + 11, 3.5, 0x58, 0xFF, 0xD2, 0x7C);
+            MakeRing(1, cx, cy, RadialOuter + 2.5, 2, 0xEE, 0xFF, 0xDE, 0xA4);
+            MakeRing(1, cx, cy, RadialInner - 3, 1.5, 0xBE, 0xFF, 0xDE, 0xA4);
 
             for (int i = 0; i < 48; i++)
             {
@@ -902,10 +1021,10 @@ namespace DesktopPet
                     X1 = cx + r1 * Math.Cos(a), Y1 = cy + r1 * Math.Sin(a),
                     X2 = cx + r2 * Math.Cos(a), Y2 = cy + r2 * Math.Sin(a),
                     Stroke = new SolidColorBrush(Color.FromArgb(0x9A, 0xFF, 0xD8, 0x8E)),
-                    StrokeThickness = 1
+                    StrokeThickness = 1,
+                    IsHitTestVisible = false
                 };
-                _radialCanvas.Children.Add(ln);
-                _goldDecos.Add(ln);
+                AddDeco(1, ln);
             }
 
             for (int i = 0; i < 8; i++)
@@ -922,46 +1041,100 @@ namespace DesktopPet
                 fig.Segments.Add(new LineSegment { Point = new Point(cx + (RadialOuter + 4) * nx - 4.5 * px, cy + (RadialOuter + 4) * ny - 4.5 * py) });
                 var geo = new PathGeometry();
                 geo.Figures.Add(fig);
-                var spike = new System.Windows.Shapes.Path { Data = geo, Fill = new SolidColorBrush(Color.FromArgb(0xA8, 0xFF, 0xCE, 0x66)) };
-                _radialCanvas.Children.Add(spike);
-                _goldDecos.Add(spike);
+                AddDeco(1, new System.Windows.Shapes.Path
+                {
+                    Data = geo,
+                    Fill = new SolidColorBrush(Color.FromArgb(0xA8, 0xFF, 0xCE, 0x66)),
+                    IsHitTestVisible = false
+                });
+            }
+        }
+
+        // 星空样式：一圈幽蓝外晕 + 两道细环 + 撒在圈外的金色星芒
+        void BuildCosmicDeco(double cx, double cy)
+        {
+            MakeRing(2, cx, cy, RadialOuter + 22, 10, 0x30, 0x7A, 0x6B, 0xFF);
+            MakeRing(2, cx, cy, RadialOuter + 9, 1.2, 0x48, 0x9F, 0xD8, 0xFF);
+            MakeRing(2, cx, cy, RadialOuter + 2.5, 1.5, 0xD8, 0xCF, 0xE8, 0xFF);
+            MakeRing(2, cx, cy, RadialInner - 4, 1.2, 0x8A, 0x9F, 0xD8, 0xFF);
+
+            // 星芒位置固定写死，避免每次重编译都换一套，方便对比
+            double[][] stars = new double[][]
+            {
+                new double[] { -104, 6.5 }, new double[] { -76, 4.2 }, new double[] { -52, 7.5 },
+                new double[] { -28, 3.6 }, new double[] { 0, 6.0 }, new double[] { 24, 4.4 },
+                new double[] { 48, 7.0 }, new double[] { 72, 4.0 }, new double[] { 96, 6.2 },
+                new double[] { 128, 4.6 }, new double[] { 156, 6.8 }, new double[] { 182, 4.2 },
+                new double[] { 210, 5.6 }, new double[] { 238, 3.8 }
+            };
+            for (int i = 0; i < stars.Length; i++)
+            {
+                double a = stars[i][0] * Math.PI / 180.0;
+                double dist = RadialOuter + (i % 3 == 0 ? 15 : (i % 3 == 1 ? 8 : 20));
+                Color c = (i % 4 == 0)
+                    ? Color.FromArgb(0xCC, 0x9F, 0xD8, 0xFF)
+                    : Color.FromArgb(0xE0, 0xFF, 0xD9, 0x8A);
+                MakeSparkle(2, cx, cy, cx + dist * Math.Cos(a), cy + dist * Math.Sin(a), stars[i][1], c);
+            }
+        }
+
+        // 霓虹样式：上青下粉两段发光弧 + 内圈细环 + 一圈粉刻度
+        void BuildNeonDeco(double cx, double cy)
+        {
+            AddArc(3, cx, cy, RadialOuter + 4, -168, -16, 10, 0x2A, 0x3F, 0xD8, 0xFF);
+            AddArc(3, cx, cy, RadialOuter + 4, -168, -16, 3, 0xEE, 0x3F, 0xE8, 0xFF);
+            AddArc(3, cx, cy, RadialOuter + 4, 16, 168, 10, 0x2A, 0xFF, 0x58, 0xC8);
+            AddArc(3, cx, cy, RadialOuter + 4, 16, 168, 3, 0xEE, 0xFF, 0x58, 0xC8);
+            MakeRing(3, cx, cy, RadialInner - 4, 1.4, 0x78, 0x3F, 0xD8, 0xFF);
+
+            for (int i = 0; i < 36; i++)
+            {
+                double a = i * 10.0 * Math.PI / 180.0;
+                var ln = new System.Windows.Shapes.Line
+                {
+                    X1 = cx + (RadialOuter + 1) * Math.Cos(a), Y1 = cy + (RadialOuter + 1) * Math.Sin(a),
+                    X2 = cx + (RadialOuter - 7) * Math.Cos(a), Y2 = cy + (RadialOuter - 7) * Math.Sin(a),
+                    Stroke = new SolidColorBrush(Color.FromArgb(0xAA, 0xFF, 0x58, 0xC8)),
+                    StrokeThickness = 1,
+                    IsHitTestVisible = false
+                };
+                AddDeco(3, ln);
             }
         }
 
         void ApplyRadialStyle()
         {
-            bool gold = _radialStyle == 1;
-            if (_radialBase != null)
-                _radialBase.Fill = gold ? _goldDarkFill : new SolidColorBrush(Color.FromArgb(0x8C, 0x33, 0x3B, 0x46));
+            if (_radialBase != null) _radialBase.Fill = _baseFill[_radialStyle];
             if (_radialRing != null)
-                _radialRing.Stroke = gold ? Brushes.Transparent : new SolidColorBrush(Color.FromArgb(0x66, 0xFF, 0xFF, 0xFF));
-            var vis = gold ? Visibility.Visible : Visibility.Collapsed;
-            for (int i = 0; i < _goldDecos.Count; i++) _goldDecos[i].Visibility = vis;
+                _radialRing.Stroke = _radialStyle == 0
+                    ? new SolidColorBrush(Color.FromArgb(0x66, 0xFF, 0xFF, 0xFF))
+                    : Brushes.Transparent;
+            for (int s = 0; s < StyleCount; s++)
+            {
+                var vis = (s == _radialStyle) ? Visibility.Visible : Visibility.Collapsed;
+                for (int i = 0; i < _decos[s].Count; i++) _decos[s][i].Visibility = vis;
+            }
             if (_radialChip != null)
             {
-                _radialChip.BorderBrush = new SolidColorBrush(gold
-                    ? Color.FromArgb(0xC0, 0xFF, 0xCE, 0x7A)
-                    : Color.FromArgb(0x90, 0xFF, 0xFF, 0xFF));
-                _radialChipText.Foreground = gold ? _goldTextNorm : Brushes.White;
-                _radialChip.Background = gold
-                    ? new SolidColorBrush(Color.FromArgb(0xC8, 0x16, 0x12, 0x08))
-                    : new SolidColorBrush(Color.FromArgb(0xB4, 0x1A, 0x18, 0x14));
+                _radialChip.BorderBrush = _chipBorder[_radialStyle];
+                _radialChipText.Foreground = _textNorm[_radialStyle];
+                _radialChip.Background = _radialStyle == 0
+                    ? new SolidColorBrush(Color.FromArgb(0xB4, 0x1A, 0x18, 0x14))
+                    : new SolidColorBrush(Color.FromArgb(0xC8, 0x12, 0x10, 0x14));
             }
             if (_radialItems != null)
             {
-                for (int i = 0; i < _radialItems.Count; i++)
-                    _radialItems[i].Tick.Foreground = gold
-                        ? new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xDC, 0x96))
-                        : Brushes.White;
+                var tickBrush = _textNorm[_radialStyle];
+                for (int i = 0; i < _radialItems.Count; i++) _radialItems[i].Tick.Foreground = tickBrush;
             }
             ApplyRadialHover();
         }
 
         void ToggleRadialStyle()
         {
-            _radialStyle = (_radialStyle + 1) % 2;
+            _radialStyle = (_radialStyle + 1) % StyleCount;
             ApplyRadialStyle();
-            Log.Write("radial style=" + _radialStyle);
+            Log.Write("radial style=" + _radialStyle + " " + StyleNames[_radialStyle]);
         }
 
         void ToggleDoze()
@@ -1079,25 +1252,22 @@ namespace DesktopPet
         void ApplyRadialHover()
         {
             if (_radialItems == null) return;
-            bool gold = _radialStyle == 1;
-            var strokeNorm = new SolidColorBrush(gold
-                ? Color.FromArgb(0x14, 0xFF, 0xD0, 0x80)
-                : Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF));
-            var strokeHot = new SolidColorBrush(gold
-                ? Color.FromArgb(0xFF, 0xFF, 0xE2, 0xAC)
-                : Color.FromArgb(0xEE, 0xFF, 0xFF, 0xFF));
+            int s = _radialStyle;
+            Color strokeN, strokeH;
+            if (s == 1) { strokeN = Color.FromArgb(0x14, 0xFF, 0xD0, 0x80); strokeH = Color.FromArgb(0xFF, 0xFF, 0xE2, 0xAC); }
+            else if (s == 2) { strokeN = Color.FromArgb(0x22, 0x9F, 0xD8, 0xFF); strokeH = Color.FromArgb(0xFF, 0xCF, 0xEF, 0xFF); }
+            else if (s == 3) { strokeN = Color.FromArgb(0x18, 0xFF, 0x58, 0xC8); strokeH = Color.FromArgb(0xFF, 0x9F, 0xF0, 0xFF); }
+            else { strokeN = Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF); strokeH = Color.FromArgb(0xEE, 0xFF, 0xFF, 0xFF); }
+            var strokeNorm = new SolidColorBrush(strokeN);
+            var strokeHot = new SolidColorBrush(strokeH);
             for (int i = 0; i < _radialItems.Count; i++)
             {
                 var it = _radialItems[i];
                 bool hot = (i == _radialHover);
-                it.Shape.Fill = hot
-                    ? (gold ? it.FillHotG : it.FillHot)
-                    : (gold ? it.FillNormG : it.FillNorm);
+                it.Shape.Fill = hot ? it.Hot[s] : it.Norm[s];
                 it.Shape.Stroke = hot ? strokeHot : strokeNorm;
                 it.Shape.StrokeThickness = hot ? 2 : 1;
-                it.Text.Foreground = gold
-                    ? (hot ? _goldTextHot : _goldTextNorm)
-                    : (hot ? _radialTextHot : _radialTextNorm);
+                it.Text.Foreground = hot ? _textHot[s] : _textNorm[s];
                 it.Text.FontWeight = hot ? FontWeights.Bold : FontWeights.SemiBold;
             }
             if (_radialChip != null)
