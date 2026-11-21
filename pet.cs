@@ -1201,7 +1201,7 @@ namespace DesktopPet
                 Width = 210, Height = 64,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Bottom,
-                Margin = new Thickness(0, 0, 0, 46),
+                Margin = new Thickness(0, 0, 0, 67),   // 让渐变最浓的一行正好压在球底（实测球底在窗口内 221DIP 处）
                 IsHitTestVisible = false,
                 Opacity = 0.0
             };
