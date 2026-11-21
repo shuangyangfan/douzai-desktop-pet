@@ -682,6 +682,10 @@ namespace DesktopPet
         double _radialCx, _radialCy;
         ContextMenu _menuFallback;
 
+        // 霓虹流动：一个定时器推相位，12 格按"离亮头多远"调亮度，一道光顺时针扫过整圈
+        DispatcherTimer _flowTimer;
+        double _flowPhase;
+
         // 12 格各自的底色（跟着功能区分配：动作类偏暖，系统类偏冷，隐藏灰、退出红）
         static readonly Color[] RadialColors = new Color[]
         {
@@ -1254,6 +1258,7 @@ namespace DesktopPet
             _radialMoveMax = 0;
             _radialDownScreen = CursorDip();
             ApplyRadialHover();
+            StartFlow();
             CaptureMouse();
             Log.Write("radial open at " + (int)_radialCx + "," + (int)_radialCy);
         }
@@ -1265,6 +1270,7 @@ namespace DesktopPet
             _radialHover = -1;
             try { if (_radial != null) _radial.IsOpen = false; } catch { }
             if (IsMouseCaptured) ReleaseMouseCapture();
+            StopFlow();
             Log.Write("radial close");
         }
 
@@ -1319,6 +1325,74 @@ namespace DesktopPet
                 _radialChip.Opacity = chipHot ? 1.0 : 0.92;
                 _radialChip.BorderThickness = new Thickness(chipHot ? 2 : 1);
                 _radialChipText.FontWeight = chipHot ? FontWeights.Bold : FontWeights.Normal;
+            }
+        }
+
+        // —— 霓虹流动 ——
+        // 不开 Effect、不做逐帧重建画笔：只改 12 个已有 SolidColorBrush 的 Opacity，
+        // 一道"彗星"光贴着环顺时针跑，后面拖 4 格的尾巴。轮盘一关就停，闲时零开销。
+        void StartFlow()
+        {
+            if (_flowTimer == null)
+            {
+                _flowTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(60) };
+                _flowTimer.Tick += delegate
+                {
+                    try { FlowTick(); }
+                    catch (Exception ex) { Log.Write("flow: " + ex.Message); StopFlow(); }
+                };
+            }
+            _flowPhase = 0;
+            
+            _flowTimer.Start();
+        }
+
+        void StopFlow()
+        {
+            
+            if (_flowTimer != null) _flowTimer.Stop();
+            // 把被流动压暗的画笔还回满亮度，下次打开不至于残留半透明
+            if (_radialItems != null)
+            {
+                for (int i = 0; i < _radialItems.Count; i++)
+                {
+                    var it = _radialItems[i];
+                    for (int s = 0; s < StyleCount; s++)
+                    {
+                        if (it.Norm[s] != null) it.Norm[s].Opacity = 1.0;
+                        if (it.Hot[s] != null) it.Hot[s].Opacity = 1.0;
+                    }
+                }
+            }
+        }
+
+        void FlowTick()
+        {
+            if (!_radialOpen || _radialItems == null) { StopFlow(); return; }
+            var p = CursorDip();
+            // 鼠标停在轮盘范围内 → 流动提速（0.3 → 0.6 格/帧），移开恢复
+            bool near = Math.Abs(p.X - _radialCx) < RadialOuter + 14 && Math.Abs(p.Y - _radialCy) < RadialOuter + 14;
+            _flowPhase = (_flowPhase + (near ? 0.4 : 0.2)) % RadialCount;   // 0.2 格/帧 ≈ 3.6 秒转一圈
+            int s = _radialStyle;
+            for (int i = 0; i < _radialItems.Count; i++)
+            {
+                var it = _radialItems[i];
+                if (i == _radialHover) { it.Shape.Fill = it.Hot[s]; it.Hot[s].Opacity = 1.0; continue; }
+                if (s == 1) { it.Shape.Fill = it.Norm[s]; it.Norm[s].Opacity = 1.0; continue; }  // 法阵保持干净的金环，不上流动色
+                double d = i - _flowPhase;
+                d = ((d % RadialCount) + RadialCount) % RadialCount;
+                double w = d < 4 ? (1.0 - d / 4.0) : 0.0;   // 头亮，尾四格渐弱
+                w = w * w;                                   // 平方一下，亮头更集中
+                if (s == 0 || s == 2)                        // 彩格/星空：底色保持满色，亮头用"提亮版"盖上去，不往黑里压
+                {
+                    if (d < 3) { it.Shape.Fill = it.Hot[s]; it.Hot[s].Opacity = 0.30 + 0.70 * w; }
+                    else { it.Shape.Fill = it.Norm[s]; it.Norm[s].Opacity = 1.0; }
+                }
+                else                                          // 法阵/霓虹：底色是透明的，用金色/霓虹光当亮头
+                {
+                    it.Shape.Fill = it.Hot[s];
+                    it.Hot[s].Opacity = 0.12 + 0.88 * w;
+                }
             }
         }
 
