@@ -2565,15 +2565,35 @@ namespace DesktopPet
             catch (WebException wex)
             {
                 string detail = "";
+                string code = "";
                 try
                 {
-                    if (wex.Response != null)
-                        using (var sr = new StreamReader(wex.Response.GetResponseStream(), Encoding.UTF8))
+                    var hr = wex.Response as HttpWebResponse;
+                    if (hr != null)
+                    {
+                        code = ((int)hr.StatusCode).ToString();
+                        using (var sr = new StreamReader(hr.GetResponseStream(), Encoding.UTF8))
                             detail = sr.ReadToEnd();
+                    }
                 }
                 catch { }
-                Log.Write("ai http: " + wex.Message + " " + Shorten(detail, 200));
-                throw new Exception(Shorten(detail.Length > 0 ? detail : wex.Message, 160));
+
+                string serverMsg = ExtractJsonField(detail, "message");
+                if (string.IsNullOrEmpty(serverMsg)) serverMsg = Shorten(detail, 200);
+                if (string.IsNullOrEmpty(serverMsg)) serverMsg = wex.Message;
+
+                string friendly = "";
+                if (code == "401") friendly = "API Key 不对或已过期";
+                else if (code == "402") friendly = "账户余额不足";
+                else if (code == "403") friendly = "没有访问权限";
+                else if (code == "404") friendly = "接口地址不对（404）";
+                else if (code == "429") friendly = "请求太频繁或额度用完";
+                else if (code.Length == 3 && code[0] == '5') friendly = "服务端错误 " + code;
+                else if (code.Length > 0) friendly = "HTTP " + code;
+
+                string shown = (friendly.Length > 0 ? friendly + "：" : "") + Shorten(serverMsg, 260);
+                Log.Write("ai http " + code + ": " + Shorten(serverMsg, 260));
+                throw new Exception(shown);
             }
 
             string content = ExtractJsonField(text, "content");
@@ -2973,6 +2993,9 @@ namespace DesktopPet
                     else
                     {
                         AddChatBubble("（连接失败：" + (err ?? "未知错误") + "）", false, true);
+                        if (err != null && (err.IndexOf("model", StringComparison.OrdinalIgnoreCase) >= 0
+                            || err.IndexOf("400") >= 0 || err.IndexOf("404") >= 0 || err.IndexOf("401") >= 0))
+                            AddChatBubble("小提示：先检查「设置」里的模型名和接口地址；4xx 一般就是这里填得不对。", false, true);
                         ShowBubble("唔…连不上模型", true, 4.0);
                         Log.Write("ai error: " + err);
                     }
@@ -3043,7 +3066,7 @@ namespace DesktopPet
                 };
                 var tbUrl = addField("接口地址（base，例：https://api.deepseek.com/v1）", _aiUrl);
                 var tbKey = addField("API Key（只存本机 config.ini，可留空）", _aiKey);
-                var tbModel = addField("模型名（deepseek-chat / ep-xxx / qwen2.5 …）", _aiModel);
+                var tbModel = addField("模型名（按服务商文档填，例：deepseek-chat / gpt-4o-mini / ep-xxx）", _aiModel);
                 sp.Children.Add(new TextBlock
                 {
                     Text = "人设提示词（可选）",
