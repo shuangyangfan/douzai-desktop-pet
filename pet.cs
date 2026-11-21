@@ -1898,7 +1898,17 @@ namespace DesktopPet
                     else if (line.StartsWith("ai_key=")) _aiKey = line.Substring(7).Trim();
                     else if (line.StartsWith("ai_model=")) _aiModel = line.Substring(9).Trim();
                     else if (line.StartsWith("ai_prompt=")) _aiPrompt = line.Substring(10).Trim();
+                    else if (line.StartsWith("chat_theme="))
+                    {
+                        int tv;
+                        if (int.TryParse(line.Substring(11).Trim(), out tv) && tv >= 0 && tv < ChatThemes.Length) _chatTheme = tv;
+                    }
+                    else if (line.StartsWith("chat_left=")) { double v; if (double.TryParse(line.Substring(10).Trim(), out v)) _chatLeft = v; }
+                    else if (line.StartsWith("chat_top=")) { double v; if (double.TryParse(line.Substring(9).Trim(), out v)) _chatTop = v; }
+                    else if (line.StartsWith("chat_w=")) { double v; if (double.TryParse(line.Substring(7).Trim(), out v)) _chatW = v; }
+                    else if (line.StartsWith("chat_h=")) { double v; if (double.TryParse(line.Substring(7).Trim(), out v)) _chatH = v; }
                 }
+                _chatHasGeom = !double.IsNaN(_chatLeft) && !double.IsNaN(_chatTop);
                 Log.Write("config load ai=" + (IsAiConfigured() ? (_aiModel + " @ " + _aiUrl) : "(not configured)"));
                 Log.Write("config load style=" + _radialStyle + " " + StyleNames[_radialStyle]);
             }
@@ -1918,7 +1928,12 @@ namespace DesktopPet
                     "ai_url=" + (_aiUrl ?? ""),
                     "ai_key=" + (_aiKey ?? ""),
                     "ai_model=" + (_aiModel ?? ""),
-                    "ai_prompt=" + ((_aiPrompt ?? "").Replace("\r", " ").Replace("\n", " "))
+                    "ai_prompt=" + ((_aiPrompt ?? "").Replace("\r", " ").Replace("\n", " ")),
+                    "chat_theme=" + _chatTheme,
+                    "chat_left=" + (_chatHasGeom ? ((int)_chatLeft).ToString() : ""),
+                    "chat_top=" + (_chatHasGeom ? ((int)_chatTop).ToString() : ""),
+                    "chat_w=" + ((int)_chatW).ToString(),
+                    "chat_h=" + ((int)_chatH).ToString()
                 }, Encoding.UTF8);
             }
             catch (Exception ex) { Log.Write("config save: " + ex.Message); }
@@ -2370,6 +2385,35 @@ namespace DesktopPet
         Border _chatThinking;
         bool _chatBusy;
         readonly List<string[]> _chatHistory = new List<string[]>();
+        int _chatTheme;
+        double _chatLeft = double.NaN, _chatTop = double.NaN, _chatW = 400, _chatH = 560;
+        bool _chatHasGeom;
+        Window _chatWinRef;
+        Border _chatHeaderEl, _chatMsgEl, _chatSwatch;
+        TextBlock _chatTitleEl;
+        System.Windows.Shapes.Ellipse _chatBlob1, _chatBlob2;
+        readonly List<Border> _chatPillBorders = new List<Border>();
+        readonly List<TextBlock> _chatPillTexts = new List<TextBlock>();
+        readonly List<TextBlock> _chatWinGlyphs = new List<TextBlock>();
+
+        struct ChatTheme
+        {
+            public string Name;
+            public int Win1, Win2, Head1, Head2, Line, Panel, InputBg, InputLine;
+            public int Acc1, Acc2, Text, Muted, PillBg, PetBubble, PetText;
+        }
+
+        static readonly ChatTheme[] ChatThemes = new ChatTheme[]
+        {
+            new ChatTheme { Name = "深空", Win1 = 0x101628, Win2 = 0x1A223E, Head1 = 0x1E2746, Head2 = 0x161D36, Line = 0x2C385C, Panel = 0x0D1222, InputBg = 0x1A2340, InputLine = 0x33406B, Acc1 = 0x5B8DEF, Acc2 = 0x8A6BFF, Text = 0xEAF0FC, Muted = 0x8C98B4, PillBg = 0xC8D6FF, PetBubble = 0xF4F8FF, PetText = 0x1C2638 },
+            new ChatTheme { Name = "暮光", Win1 = 0x1A1030, Win2 = 0x2A1440, Head1 = 0x2A1848, Head2 = 0x1E1034, Line = 0x3C2A5C, Panel = 0x140C24, InputBg = 0x1E1236, InputLine = 0x4A3468, Acc1 = 0xC06BE8, Acc2 = 0xF06BA0, Text = 0xF4ECFF, Muted = 0xA896C4, PillBg = 0xE8D6FF, PetBubble = 0xF8F0FF, PetText = 0x2A1C38 },
+            new ChatTheme { Name = "深海", Win1 = 0x0A1A24, Win2 = 0x0E2A38, Head1 = 0x0F2A38, Head2 = 0x0A1F2A, Line = 0x1F4454, Panel = 0x081820, InputBg = 0x0E2632, InputLine = 0x235064, Acc1 = 0x2FB8D8, Acc2 = 0x4FE0C8, Text = 0xE6F8FF, Muted = 0x8FB4C4, PillBg = 0xC8F0FF, PetBubble = 0xEFFCFF, PetText = 0x12303C },
+            new ChatTheme { Name = "暖沙", Win1 = 0x1C1710, Win2 = 0x2A2114, Head1 = 0x2A2114, Head2 = 0x20180E, Line = 0x4A3A24, Panel = 0x16110A, InputBg = 0x231B10, InputLine = 0x4A3A24, Acc1 = 0xE0A050, Acc2 = 0xF0C060, Text = 0xFBF2E2, Muted = 0xB0A088, PillBg = 0xFFE8C0, PetBubble = 0xFFF8EC, PetText = 0x30240F },
+            new ChatTheme { Name = "墨黑", Win1 = 0x14161A, Win2 = 0x1E2126, Head1 = 0x22252B, Head2 = 0x191B20, Line = 0x33373F, Panel = 0x101216, InputBg = 0x1A1D23, InputLine = 0x3A3F48, Acc1 = 0x6E8FD8, Acc2 = 0x9AA8F0, Text = 0xF0F2F6, Muted = 0x949AA6, PillBg = 0xD8DCE6, PetBubble = 0xF2F4F8, PetText = 0x1C1F26 },
+        };
+
+        static Color ThemeColor(int rgb) { return Col(0xFF, rgb); }
+        static Color ThemeColorA(byte a, int rgb) { return Color.FromArgb(a, (byte)((rgb >> 16) & 0xFF), (byte)((rgb >> 8) & 0xFF), (byte)(rgb & 0xFF)); }
 
         static string Shorten(string s, int max)
         {
@@ -2633,6 +2677,89 @@ namespace DesktopPet
             };
         }
 
+        void RegisterChatPill(Border b)
+        {
+            _chatPillBorders.Add(b);
+            _chatPillTexts.Add(b.Child as TextBlock);
+        }
+
+        void ApplyChatTheme()
+        {
+            var th = ChatThemes[_chatTheme];
+            try
+            {
+                if (_chatWinRef != null) _chatWinRef.Background = ChatGrad(0xFF, th.Win1, 0xFF, th.Win2);
+                if (_chatHeaderEl != null)
+                {
+                    _chatHeaderEl.Background = ChatGrad(0xFF, th.Head1, 0xFF, th.Head2);
+                    _chatHeaderEl.BorderBrush = new SolidColorBrush(ThemeColor(th.Line));
+                }
+                if (_chatTitleEl != null) _chatTitleEl.Foreground = new SolidColorBrush(ThemeColor(th.Text));
+                if (_chatHint != null) _chatHint.Foreground = new SolidColorBrush(ThemeColor(th.Muted));
+                if (_chatMsgEl != null)
+                {
+                    _chatMsgEl.Background = new SolidColorBrush(ThemeColor(th.Panel));
+                    _chatMsgEl.BorderBrush = new SolidColorBrush(ThemeColor(th.Line));
+                }
+                if (_chatInputWrap != null) _chatInputWrap.Background = new SolidColorBrush(ThemeColor(th.InputBg));
+                if (_chatSend != null) _chatSend.Background = ChatGrad(0xFF, th.Acc1, 0xFF, th.Acc2);
+                for (int i = 0; i < _chatPillBorders.Count; i++)
+                {
+                    var pb = _chatPillBorders[i];
+                    pb.Background = new SolidColorBrush(ThemeColorA(0x33, th.PillBg));
+                    pb.BorderBrush = new SolidColorBrush(ThemeColorA(0x40, th.PillBg));
+                    if (i < _chatPillTexts.Count && _chatPillTexts[i] != null)
+                        _chatPillTexts[i].Foreground = new SolidColorBrush(ThemeColor(th.Text));
+                }
+                for (int i = 0; i < _chatWinGlyphs.Count; i++)
+                    _chatWinGlyphs[i].Foreground = new SolidColorBrush(ThemeColor(th.Muted));
+                if (_chatBlob1 != null)
+                {
+                    var b1 = new RadialGradientBrush();
+                    b1.GradientStops.Add(new GradientStop(ThemeColorA(0x24, th.Acc1), 0.0));
+                    b1.GradientStops.Add(new GradientStop(ThemeColorA(0x00, th.Acc1), 1.0));
+                    b1.Freeze();
+                    _chatBlob1.Fill = b1;
+                }
+                if (_chatBlob2 != null)
+                {
+                    var b2 = new RadialGradientBrush();
+                    b2.GradientStops.Add(new GradientStop(ThemeColorA(0x20, th.Acc2), 0.0));
+                    b2.GradientStops.Add(new GradientStop(ThemeColorA(0x00, th.Acc2), 1.0));
+                    b2.Freeze();
+                    _chatBlob2.Fill = b2;
+                }
+                if (_chatSwatch != null) _chatSwatch.Background = ChatGrad(0xFF, th.Acc1, 0xFF, th.Acc2);
+                if (_chatDot != null)
+                    _chatDot.Fill = new SolidColorBrush(IsAiConfigured() ? Col(0xFF, 0x5B, 0xD0, 0x8A) : ThemeColor(th.Muted));
+                RebuildChatHistory();
+            }
+            catch (Exception ex) { Log.Write("chat theme: " + ex.Message); }
+        }
+
+        void RebuildChatHistory()
+        {
+            if (_chatList == null) return;
+            _chatThinking = null;
+            _chatList.Children.Clear();
+            for (int i = 0; i < _chatHistory.Count; i++)
+                AddChatBubble(_chatHistory[i][1], _chatHistory[i][0] == "user", false);
+            if (_chatHistory.Count == 0)
+                AddChatBubble(IsAiConfigured()
+                    ? "你好呀，我是豆仔～想聊点什么？"
+                    : "你好呀，我是豆仔～先点右上角「设置」填一下模型接口（OpenAI 兼容），我们就能聊天啦。Ctrl+O 也能打开设置。",
+                    false, !IsAiConfigured());
+        }
+
+        void CycleChatTheme()
+        {
+            _chatTheme = (_chatTheme + 1) % ChatThemes.Length;
+            ApplyChatTheme();
+            AddChatBubble("窗口配色：" + ChatThemes[_chatTheme].Name, false, true);
+            SaveSettings();
+            Log.Write("chat theme=" + _chatTheme + " " + ChatThemes[_chatTheme].Name);
+        }
+
         void AddChatBubble(string text, bool fromUser, bool system)
         {
             if (_chatList == null) return;
@@ -2644,7 +2771,7 @@ namespace DesktopPet
                     Text = text,
                     FontSize = 11.5,
                     FontFamily = font,
-                    Foreground = new SolidColorBrush(Col(0xFF, 0x8E, 0x9C, 0xBC)),
+                    Foreground = new SolidColorBrush(ThemeColor(ChatThemes[_chatTheme].Muted)),
                     TextWrapping = TextWrapping.Wrap,
                     HorizontalAlignment = HorizontalAlignment.Center,
                     TextAlignment = TextAlignment.Center,
@@ -2662,7 +2789,7 @@ namespace DesktopPet
                 FontFamily = font,
                 TextWrapping = TextWrapping.Wrap,
                 LineHeight = 19,
-                Foreground = fromUser ? Brushes.White : new SolidColorBrush(Col(0xFF, 0x1C, 0x26, 0x38))
+                Foreground = fromUser ? Brushes.White : new SolidColorBrush(ThemeColor(ChatThemes[_chatTheme].PetText))
             };
             var bubble = new Border
             {
@@ -2671,8 +2798,8 @@ namespace DesktopPet
                 Padding = new Thickness(11, 7, 11, 7),
                 MaxWidth = 282,
                 Background = fromUser
-                    ? ChatGrad(0xFF, 0x4E7FE0, 0xFF, 0x6F63E8)
-                    : new SolidColorBrush(Col(0xFA, 0xF4, 0xF8, 0xFF)),
+                    ? ChatGrad(0xFF, ChatThemes[_chatTheme].Acc1, 0xFF, ChatThemes[_chatTheme].Acc2)
+                    : new SolidColorBrush(ThemeColorA(0xFA, ChatThemes[_chatTheme].PetBubble)),
                 Effect = fromUser
                     ? ChatShadow(0x38, Col(0xFF, 0x2A, 0x3F, 0x9A))
                     : ChatShadow(0x30, Col(0xFF, 0x0A, 0x12, 0x28))
@@ -2707,14 +2834,14 @@ namespace DesktopPet
                 FontSize = 12.5,
                 FontStyle = FontStyles.Italic,
                 FontFamily = new FontFamily("Microsoft YaHei UI"),
-                Foreground = new SolidColorBrush(Col(0xFF, 0x6E, 0x7C, 0x9C))
+                Foreground = new SolidColorBrush(ThemeColor(ChatThemes[_chatTheme].Muted))
             };
             var bubble = new Border
             {
                 Child = tb,
                 CornerRadius = new CornerRadius(4, 14, 14, 14),
                 Padding = new Thickness(12, 8, 12, 8),
-                Background = new SolidColorBrush(Col(0xCC, 0xEC, 0xF1, 0xFC)),
+                Background = new SolidColorBrush(ThemeColorA(0xCC, ChatThemes[_chatTheme].PetBubble)),
                 VerticalAlignment = VerticalAlignment.Top
             };
             var row = new StackPanel
@@ -3103,6 +3230,19 @@ namespace DesktopPet
                 ApplyCustomChrome(win, 68.0, true);
                 var winIcon = MakeWindowIcon();
                 if (winIcon != null) win.Icon = winIcon;
+                // 还原上次的位置/大小（第一次打开才居中）
+                if (_chatHasGeom)
+                {
+                    var wa = SystemParameters.WorkArea;
+                    double w = Math.Max(340, Math.Min(_chatW, wa.Width));
+                    double h = Math.Max(400, Math.Min(_chatH, wa.Height));
+                    win.WindowStartupLocation = WindowStartupLocation.Manual;
+                    win.Width = w;
+                    win.Height = h;
+                    win.Left = Math.Min(Math.Max(_chatLeft, wa.Left), wa.Right - w);
+                    win.Top = Math.Min(Math.Max(_chatTop, wa.Top), wa.Bottom - h);
+                }
+                _chatWinRef = win;
                 var root = new Grid();
                 root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
                 root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -3116,6 +3256,7 @@ namespace DesktopPet
                     BorderThickness = new Thickness(0, 0, 0, 1),
                     Padding = new Thickness(14, 11, 12, 11)
                 };
+                _chatHeaderEl = header;
                 var headerGrid = new Grid();
                 headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
                 headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -3125,13 +3266,14 @@ namespace DesktopPet
                 Grid.SetColumn(av, 0);
                 headerGrid.Children.Add(av);
                 var titleStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-                titleStack.Children.Add(new TextBlock
+                _chatTitleEl = new TextBlock
                 {
                     Text = "豆仔 · AI 聊天",
                     FontSize = 15,
                     FontWeight = FontWeights.Bold,
                     Foreground = Brushes.White
-                });
+                };
+                titleStack.Children.Add(_chatTitleEl);
                 var hintRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 3, 0, 0) };
                 _chatDot = new System.Windows.Shapes.Ellipse
                 {
@@ -3153,10 +3295,31 @@ namespace DesktopPet
                 Grid.SetColumn(titleStack, 1);
                 headerGrid.Children.Add(titleStack);
                 var headerBtns = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+                // 配色圆点：点一下切下一套窗口颜色
+                _chatSwatch = new Border
+                {
+                    Tag = "nodrag",
+                    Width = 22, Height = 22,
+                    CornerRadius = new CornerRadius(11),
+                    Background = ChatGrad(0xFF, ChatThemes[_chatTheme].Acc1, 0xFF, ChatThemes[_chatTheme].Acc2),
+                    BorderThickness = new Thickness(1.4),
+                    BorderBrush = new SolidColorBrush(Col(0x88, 0xFF, 0xFF, 0xFF)),
+                    Cursor = Cursors.Hand,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 0, 8, 0),
+                    ToolTip = "切换窗口配色"
+                };
+                _chatSwatch.MouseLeftButtonUp += delegate { CycleChatTheme(); };
+                _chatSwatch.MouseEnter += delegate { _chatSwatch.Opacity = 0.8; };
+                _chatSwatch.MouseLeave += delegate { _chatSwatch.Opacity = 1.0; };
+                headerBtns.Children.Add(_chatSwatch);
                 var btnSet = MakePillButton("设置", delegate { ShowAiSettings(); }, false);
                 btnSet.Margin = new Thickness(0, 0, 6, 0);
+                RegisterChatPill(btnSet);
                 headerBtns.Children.Add(btnSet);
-                headerBtns.Children.Add(MakePillButton("清空", delegate { ClearChat(); }, false));
+                var btnClear = MakePillButton("清空", delegate { ClearChat(); }, false);
+                RegisterChatPill(btnClear);
+                headerBtns.Children.Add(btnClear);
                 headerBtns.Children.Add(new Border
                 {
                     Width = 1, Height = 18,
@@ -3164,8 +3327,12 @@ namespace DesktopPet
                     Margin = new Thickness(8, 0, 6, 0),
                     VerticalAlignment = VerticalAlignment.Center
                 });
-                headerBtns.Children.Add(MakeWinButton("—", win, delegate { win.WindowState = WindowState.Minimized; }, false));
-                headerBtns.Children.Add(MakeWinButton("✕", win, delegate { win.Close(); }, true));
+                var btnMin = MakeWinButton("—", win, delegate { win.WindowState = WindowState.Minimized; }, false);
+                if (btnMin.Child is TextBlock) _chatWinGlyphs.Add((TextBlock)btnMin.Child);
+                headerBtns.Children.Add(btnMin);
+                var btnClose = MakeWinButton("✕", win, delegate { win.Close(); }, true);
+                if (btnClose.Child is TextBlock) _chatWinGlyphs.Add((TextBlock)btnClose.Child);
+                headerBtns.Children.Add(btnClose);
                 Grid.SetColumn(headerBtns, 2);
                 headerGrid.Children.Add(headerBtns);
                 header.Child = headerGrid;
@@ -3182,6 +3349,7 @@ namespace DesktopPet
                     BorderBrush = new SolidColorBrush(Col(0xFF, 0x22, 0x2C, 0x4A)),
                     BorderThickness = new Thickness(1)
                 };
+                _chatMsgEl = msgBg;
                 msgWrap.Children.Add(msgBg);
                 var blobs = new Canvas { IsHitTestVisible = false };
                 var blob1 = new System.Windows.Shapes.Ellipse { Width = 210, Height = 160 };
@@ -3193,6 +3361,7 @@ namespace DesktopPet
                 Canvas.SetLeft(blob1, -50);
                 Canvas.SetTop(blob1, -60);
                 blobs.Children.Add(blob1);
+                _chatBlob1 = blob1;
                 var blob2 = new System.Windows.Shapes.Ellipse { Width = 240, Height = 170 };
                 var b2 = new RadialGradientBrush();
                 b2.GradientStops.Add(new GradientStop(WithAlpha(Col(0xFF, 0x8A, 0x6B, 0xFF), 0x1E), 0.0));
@@ -3202,6 +3371,7 @@ namespace DesktopPet
                 Canvas.SetRight(blob2, -60);
                 Canvas.SetBottom(blob2, -70);
                 blobs.Children.Add(blob2);
+                _chatBlob2 = blob2;
                 msgWrap.Children.Add(blobs);
                 _chatScroll = new ScrollViewer
                 {
@@ -3266,12 +3436,12 @@ namespace DesktopPet
                 _chatInput.GotFocus += delegate
                 {
                     if (_chatInputWrap != null)
-                        _chatInputWrap.BorderBrush = new SolidColorBrush(Col(0xFF, 0x6B, 0x8F, 0xF0));
+                        _chatInputWrap.BorderBrush = new SolidColorBrush(ThemeColor(ChatThemes[_chatTheme].Acc1));
                 };
                 _chatInput.LostFocus += delegate
                 {
                     if (_chatInputWrap != null)
-                        _chatInputWrap.BorderBrush = new SolidColorBrush(Col(0xFF, 0x33, 0x40, 0x6B));
+                        _chatInputWrap.BorderBrush = new SolidColorBrush(ThemeColor(ChatThemes[_chatTheme].InputLine));
                 };
                 _chatInput.KeyDown += delegate(object s2, KeyEventArgs e2)
                 {
@@ -3286,7 +3456,19 @@ namespace DesktopPet
                 win.Content = shell;
                 win.Closed += delegate
                 {
+                    try
+                    {
+                        // 记住窗口位置/大小，下次打开还原
+                        _chatLeft = win.Left;
+                        _chatTop = win.Top;
+                        _chatW = win.Width;
+                        _chatH = win.Height;
+                        _chatHasGeom = true;
+                        SaveSettings();
+                    }
+                    catch (Exception ex) { Log.Write("chat geom: " + ex.Message); }
                     _chatWin = null;
+                    _chatWinRef = null;
                     _chatList = null;
                     _chatScroll = null;
                     _chatInput = null;
@@ -3296,6 +3478,15 @@ namespace DesktopPet
                     _chatPlaceholder = null;
                     _chatDot = null;
                     _chatThinking = null;
+                    _chatHeaderEl = null;
+                    _chatMsgEl = null;
+                    _chatTitleEl = null;
+                    _chatSwatch = null;
+                    _chatBlob1 = null;
+                    _chatBlob2 = null;
+                    _chatPillBorders.Clear();
+                    _chatPillTexts.Clear();
+                    _chatWinGlyphs.Clear();
                 };
                 win.PreviewKeyDown += delegate(object s2, KeyEventArgs e2)
                 {
@@ -3317,17 +3508,28 @@ namespace DesktopPet
                         e2.Handled = true;
                     }
                 };
-                win.Loaded += delegate { try { _chatInput.Focus(); } catch { } };
+                win.Loaded += delegate
+                {
+                    try
+                    {
+                        if (_chatHasGeom)
+                        {
+                            var wa = SystemParameters.WorkArea;
+                            double w = Math.Max(340, Math.Min(_chatW, wa.Width));
+                            double h = Math.Max(400, Math.Min(_chatH, wa.Height));
+                            win.Width = w;
+                            win.Height = h;
+                            win.Left = Math.Min(Math.Max(_chatLeft, wa.Left), wa.Right - w);
+                            win.Top = Math.Min(Math.Max(_chatTop, wa.Top), wa.Bottom - h);
+                        }
+                    }
+                    catch { }
+                    try { _chatInput.Focus(); } catch { }
+                };
 
                 _chatWin = win;
+                ApplyChatTheme();
                 UpdateChatHint();
-                for (int i = 0; i < _chatHistory.Count; i++)
-                    AddChatBubble(_chatHistory[i][1], _chatHistory[i][0] == "user", false);
-                if (_chatHistory.Count == 0)
-                {
-                    if (IsAiConfigured()) AddChatBubble("你好呀，我是豆仔～想聊点什么？", false, false);
-                    else AddChatBubble("你好呀，我是豆仔～先点右上角「设置」填一下模型接口（OpenAI 兼容），我们就能聊天啦。Ctrl+O 也能打开设置。", false, true);
-                }
                 win.Show();
             }
             catch (Exception ex) { Log.Write("chat window: " + ex.Message); }
