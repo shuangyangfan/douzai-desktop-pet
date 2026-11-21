@@ -287,6 +287,19 @@ namespace DesktopPet
         double _pinTimer;              // /pet/move 后钉住秒数（期间不闲逛）
         bool _paused;                  // /pet/pause：彻底暂停闲逛
 
+        // FIX-ORB：悬浮魔法球——一只会飘的青色光球；闲逛时豆仔去追它，追到就闪开
+        bool _orbEnabled = true;                        // 右键菜单可关
+        bool _hasWalkTarget;                            // 本次行走是否锁定目标（追球时才有）
+        double _walkTargetX;                            // 目标：窗口 Left 的目标值（DIP）
+        Window _orbWindow;
+        System.Windows.Shapes.Ellipse _orbGlow;
+        System.Windows.Shapes.Ellipse _orbCore;
+        double _orbX = double.NaN, _orbY = double.NaN;  // 球心屏幕坐标（DIP），NaN = 还没初始化
+        double _orbTX, _orbTY;                          // 缓动目标
+        double _orbIdleT;                               // 自行漂移计时
+        double _orbBob;                                 // 浮动相位
+        double _catchT;                                 // 闪开后的防抖
+
         public PetWindow()
         {
             AllowsTransparency = true;
@@ -357,6 +370,7 @@ namespace DesktopPet
 
             CreateTray();
             BuildPetMenu();
+            BuildOrb();   // FIX-ORB：悬浮魔法球
 
             // 开场白：上场 0.8s 后冒一次"豆仔来啦～"，之后不再自动说话
             var greet = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
@@ -376,6 +390,11 @@ namespace DesktopPet
         {
             try
             {
+                if (_orbWindow != null)
+                {
+                    _orbWindow.Close();       // FIX-ORB：主人关了，魔法球也得跟着关，否则会剩一只光球在桌面上
+                    _orbWindow = null;
+                }
                 if (_tray != null)
                 {
                     _tray.Visible = false;
@@ -399,6 +418,13 @@ namespace DesktopPet
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         static extern bool DestroyIcon(IntPtr hIcon);
+
+        // FIX-ORB：魔法球窗口要"鼠标穿透"——透明窗口里的 Transparent 背景仍然吃点击，
+        // 必须靠 WS_EX_TRANSPARENT 才能让鼠标穿过光球落到下面的桌面/窗口
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
         // ================= P0-1 托盘 =================
 
@@ -524,6 +550,22 @@ namespace DesktopPet
                 };
                 menu.Items.Add(miPause);
                 menu.Opened += delegate { miPause.IsChecked = _paused; };
+
+                // FIX-ORB：魔法球开关（关掉就只剩普通闲逛）
+                var miOrb = new System.Windows.Controls.MenuItem
+                {
+                    Header = "魔法球（追着玩）",
+                    IsCheckable = true,
+                    IsChecked = _orbEnabled
+                };
+                miOrb.Click += delegate
+                {
+                    _orbEnabled = miOrb.IsChecked;
+                    if (!_orbEnabled && _state == State.Walk && _hasWalkTarget) { _hasWalkTarget = false; EnterIdle(); }
+                    Log.Write("orb=" + _orbEnabled);
+                };
+                menu.Items.Add(miOrb);
+                menu.Opened += delegate { miOrb.IsChecked = _orbEnabled; };
 
                 var miHide = new System.Windows.Controls.MenuItem { Header = "隐藏" };
                 miHide.Click += delegate { ApiSetVisible(false); };
@@ -1101,9 +1143,160 @@ namespace DesktopPet
         public void ApiSetVisible(bool show)
         {
             Visibility = show ? Visibility.Visible : Visibility.Hidden;
+            try
+            {
+                if (_orbWindow != null)
+                    _orbWindow.Visibility = show && _orbEnabled ? Visibility.Visible : Visibility.Hidden;
+            }
+            catch (Exception ex) { Log.Write("orb visible: " + ex.Message); }
         }
 
         // ================= P0-7 多显示器工作区 =================
+
+        // 宠物中心点所在屏幕的工作区（换算为 DIP 坐标）
+        // ================= FIX-ORB 悬浮魔法球 =================
+
+        // 独立一个置顶透明小窗：光球可以飘到桌面上任何地方，豆仔的窗口再去追
+        void BuildOrb()
+        {
+            try
+            {
+                var g = new Grid();
+
+                _orbGlow = new System.Windows.Shapes.Ellipse { Width = 112, Height = 112 };
+                var glowBrush = new RadialGradientBrush();
+                glowBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0xAA, 0x8C, 0xE0, 0xFF), 0.00));
+                glowBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0x5A, 0x5E, 0xC4, 0xFF), 0.45));
+                glowBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 0x33, 0x88, 0xDD), 1.00));
+                _orbGlow.Fill = glowBrush;
+                _orbGlow.HorizontalAlignment = HorizontalAlignment.Center;
+                _orbGlow.VerticalAlignment = VerticalAlignment.Center;
+
+                _orbCore = new System.Windows.Shapes.Ellipse { Width = 32, Height = 32 };
+                var coreBrush = new RadialGradientBrush();
+                coreBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF), 0.00));
+                coreBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0xF2, 0xC8, 0xF4, 0xFF), 0.42));
+                coreBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0x70, 0x7E, 0xD8, 0xFF), 0.82));
+                coreBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 0x4E, 0xA8, 0xFF), 1.00));
+                _orbCore.Fill = coreBrush;
+                _orbCore.HorizontalAlignment = HorizontalAlignment.Center;
+                _orbCore.VerticalAlignment = VerticalAlignment.Center;
+
+                g.Children.Add(_orbGlow);
+                g.Children.Add(_orbCore);
+
+                var w = new Window
+                {
+                    WindowStyle = WindowStyle.None,
+                    AllowsTransparency = true,
+                    Background = Brushes.Transparent,
+                    Topmost = true,
+                    ShowInTaskbar = false,
+                    ResizeMode = ResizeMode.NoResize,
+                    Width = 120,
+                    Height = 120,
+                    Focusable = false,
+                    IsHitTestVisible = false,   // 鼠标穿透，不挡桌面操作
+                    Title = "豆仔·魔法球"
+                };
+                w.Content = g;
+                _orbWindow = w;
+                // 注意：构造期本窗口还没 Show，设 Owner 会抛"无法将 Owner 属性设置为之前未显示的 Window"，
+                // 所以不用 Owner，改成在主窗口关闭时手动关掉球
+                w.Show();
+
+                // 鼠标穿透 + 不进 Alt-Tab：WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+                try
+                {
+                    var hwnd = new System.Windows.Interop.WindowInteropHelper(w).Handle;
+                    int ex = GetWindowLong(hwnd, -20);
+                    SetWindowLong(hwnd, -20, ex | 0x20 | 0x80 | 0x08000000);
+                }
+                catch (Exception ex2) { Log.Write("orb clickthrough: " + ex2.Message); }
+
+                _orbX = Left + Width * 0.5 + 150;
+                _orbY = Top + 60;
+                _orbTX = _orbX;
+                _orbTY = _orbY;
+                ApplyOrbPos();
+                Log.Write("orb on");
+            }
+            catch (Exception ex) { Log.Write("orb init: " + ex.Message); }
+        }
+
+        void ApplyOrbPos()
+        {
+            if (_orbWindow == null) return;
+            double bob = Math.Sin(_orbBob * 1.7) * 7.0;
+            _orbWindow.Left = _orbX - 60;
+            _orbWindow.Top = _orbY + bob - 60;
+        }
+
+        void TickOrb(double dt)
+        {
+            if (_orbWindow == null) return;
+
+            if (!_orbEnabled || Visibility != Visibility.Visible)
+            {
+                if (_orbWindow.Visibility != Visibility.Hidden) _orbWindow.Visibility = Visibility.Hidden;
+                return;
+            }
+            if (_orbWindow.Visibility != Visibility.Visible) _orbWindow.Visibility = Visibility.Visible;
+
+            var area = WorkArea();
+            double cx = Left + Width * 0.5;
+            double cy = Top + Height * 0.45;
+
+            if (double.IsNaN(_orbX))
+            {
+                _orbX = cx + 150; _orbY = Top + 60; _orbTX = _orbX; _orbTY = _orbY;
+            }
+
+            // 自己慢慢闲飘：3~7 秒换个落点，只在豆仔附近晃，绝不飘出屏幕
+            _orbIdleT -= dt;
+            if (_orbIdleT <= 0)
+            {
+                _orbIdleT = 3.0 + _rand.NextDouble() * 4.0;
+                double nx = cx + (_rand.NextDouble() * 2 - 1) * 250;
+                double ny = cy - 90 + (_rand.NextDouble() * 2 - 1) * 80;
+                _orbTX = Math.Max(area.Left + 55, Math.Min(area.Right - 55, nx));
+                _orbTY = Math.Max(area.Top + 55, Math.Min(area.Bottom - 55, ny));
+            }
+
+            // 豆仔追到身边 → 往反方向窜开，并抬高一点
+            if (_catchT > 0) _catchT -= dt;
+            if (_catchT <= 0 && Math.Abs(_orbX - cx) < 46 && Math.Abs(_orbY - cy) < 150)
+            {
+                double away = (_orbX >= cx) ? 1 : -1;
+                double nx = _orbX + away * (120 + _rand.NextDouble() * 140);
+                if (nx > area.Right - 80 || nx < area.Left + 80)      // 贴边就改窜另一侧
+                    nx = cx - away * (150 + _rand.NextDouble() * 90);
+                _orbTX = Math.Max(area.Left + 55, Math.Min(area.Right - 55, nx));
+                _orbTY = Math.Max(area.Top + 55, Math.Min(area.Bottom - 55, cy - 100 - _rand.NextDouble() * 40));
+                _catchT = 0.9;
+                if (_state == State.Walk && _hasWalkTarget) { _hasWalkTarget = false; EnterIdle(); }
+                Log.Write("orb dodge");
+            }
+
+            // 缓动飞过去（约 4/s 收敛），浮动的上下位移在渲染层单独加
+            double k = Math.Min(1.0, dt * 4.0);
+            _orbX += (_orbTX - _orbX) * k;
+            _orbY += (_orbTY - _orbY) * k;
+            _orbBob += dt;
+            if (_orbGlow != null) _orbGlow.Opacity = 0.72 + 0.28 * Math.Sin(_orbBob * 2.3);
+            ApplyOrbPos();
+        }
+
+        // 抓不到时的反应：到了球底下就跳一下（复用现有 jump 动画）
+        void OrbCaught()
+        {
+            try
+            {
+                if (!_orbEnabled) return;
+                ApiAction("jump");
+            }
+            catch (Exception ex) { Log.Write("orb caught: " + ex.Message); }
+        }
 
         // 宠物中心点所在屏幕的工作区（换算为 DIP 坐标）
         Rect WorkArea()
@@ -1755,13 +1948,29 @@ namespace DesktopPet
                     SetEyes(1.0);
                     var area = WorkArea();
                     double nx = Left + _dir * WalkSpeed * dt;
+                    bool reachedOrb = false;
+                    if (_hasWalkTarget)
+                    {
+                        double dx = _walkTargetX - Left;
+                        double step = WalkSpeed * dt;
+                        if (Math.Abs(dx) <= step || Math.Abs(dx) <= 3.0)
+                        {
+                            nx = _walkTargetX;
+                            _hasWalkTarget = false;
+                            reachedOrb = true;
+                        }
+                        else nx = Left + Math.Sign(dx) * step;
+                    }
                     if (nx < area.Left || nx + Width > area.Right || _stateTimer <= 0)
                     {
+                        _hasWalkTarget = false;
                         EnterIdle();
                     }
                     else
                     {
                         Left = nx;
+                        // FIX-ORB：走到球底下 → 起跳去抓（球会同时窜开，抓不到是常态）
+                        if (reachedOrb) { OrbCaught(); EnterIdle(); }
                     }
                 }
                 else
@@ -1813,6 +2022,7 @@ namespace DesktopPet
                 // P0-7 每帧吸附到当前屏幕工作区（显示器切换/拔插自动纠正）
                 ClampToWorkArea();
                 TickParallax();
+                TickOrb(dt);          // FIX-ORB：魔法球自己飘 / 被追时闪开
             }
             catch (Exception ex)
             {
@@ -1838,6 +2048,22 @@ namespace DesktopPet
             _stateTimer = WalkMin + _rand.NextDouble() * (WalkMax - WalkMin);
             _dir = _rand.Next(2) == 0 ? 1.0 : -1.0;
             AnimateYaw(_dir > 0 ? WalkYawDeg : -WalkYawDeg);
+
+            // FIX-ORB：魔法球开着就优先去追它——目标取球心正下方，走不到才退回随机散步
+            _hasWalkTarget = false;
+            if (_orbEnabled && _orbWindow != null && !double.IsNaN(_orbX) &&
+                _orbWindow.Visibility == Visibility.Visible)
+            {
+                var area = WorkArea();
+                double tx = Math.Max(area.Left, Math.Min(area.Right - Width, _orbX - Width * 0.5));
+                if (Math.Abs(tx - Left) > 10)
+                {
+                    _hasWalkTarget = true;
+                    _walkTargetX = tx;
+                    _dir = tx > Left ? 1.0 : -1.0;
+                    AnimateYaw(_dir > 0 ? WalkYawDeg : -WalkYawDeg);
+                }
+            }
         }
 
         // FIX-TURN P0-2：一律走最短路径——delta 折进 (-180,180]，起点取与 target 等价且离当前最近的角。
