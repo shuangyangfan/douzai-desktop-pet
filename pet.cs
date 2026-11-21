@@ -1292,10 +1292,12 @@ namespace DesktopPet
         List<System.Windows.Shapes.Ellipse> _orbSelGlow = new List<System.Windows.Shapes.Ellipse>();
         List<System.Windows.Shapes.Ellipse> _orbStateDot = new List<System.Windows.Shapes.Ellipse>();
         List<System.Windows.Shapes.Ellipse> _orbSelRing = new List<System.Windows.Shapes.Ellipse>();
-        List<System.Windows.Shapes.Ellipse> _orbBodyEls = new List<System.Windows.Shapes.Ellipse>();
-        List<System.Windows.Shapes.Ellipse> _orbRimEls = new List<System.Windows.Shapes.Ellipse>();
+        List<System.Windows.Shapes.Path> _orbBodyEls = new List<System.Windows.Shapes.Path>();
+        List<System.Windows.Shapes.Path> _orbRimEls = new List<System.Windows.Shapes.Path>();
         List<Brush> _orbBrNorm = new List<Brush>();
         List<Brush> _orbBrOn = new List<Brush>();
+        List<Brush> _orbRimNorm = new List<Brush>();
+        static readonly Brush _orbRimOn = new SolidColorBrush(Color.FromArgb(0xB4, 0xFF, 0xF0, 0xC0));
         List<double> _orbPhase = new List<double>();
         List<double> _orbSizeVar = new List<double>();
         readonly List<UIElement> _orbSparkles = new List<UIElement>();
@@ -1330,24 +1332,77 @@ namespace DesktopPet
             return i;
         }
 
-        // 星体表面：冰蓝（常态）/ 暖金（已开启）
-        static RadialGradientBrush BubbleBrush(bool warm)
+        // ---- 水彩配色：12 颗星体一人一色 ----
+        static readonly int[] VividPalette = new int[]
         {
-            var br = new RadialGradientBrush { Center = new Point(0.34, 0.28), GradientOrigin = new Point(0.34, 0.28) };
-            if (warm)
+            0xFF7A68, 0xFFA23A, 0xFFD23F, 0x8FD14F, 0x2FC39A, 0x35B5E8,
+            0x5B7FEF, 0x8A6BFF, 0xC86BEA, 0xF0639E, 0xFF8A5C, 0x2ED3C6
+        };
+
+        static Color VividColor(int i)
+        {
+            int n = VividPalette.Length;
+            return Col(0xFF, VividPalette[((i % n) + n) % n]);
+        }
+
+        static Color WithAlpha(Color c, byte a) { return Color.FromArgb(a, c.R, c.G, c.B); }
+
+        static Color MixColor(Color a, Color b, double k)
+        {
+            if (k <= 0) return a;
+            if (k >= 1) return b;
+            return Color.FromArgb(
+                (byte)(a.A + (b.A - a.A) * k),
+                (byte)(a.R + (b.R - a.R) * k),
+                (byte)(a.G + (b.G - a.G) * k),
+                (byte)(a.B + (b.B - a.B) * k));
+        }
+
+        static Color ShadeColor(Color c, double k)
+        {
+            return Color.FromArgb(c.A,
+                (byte)Math.Min(255, c.R * k),
+                (byte)Math.Min(255, c.G * k),
+                (byte)Math.Min(255, c.B * k));
+        }
+
+        // 一团水彩：圆球边缘按正弦微扰，像手绘颜料边
+        static Geometry BlobGeo(double cx, double cy, double r, double phase)
+        {
+            var fig = new PathFigure { IsClosed = true, IsFilled = true };
+            int n = 40;
+            for (int k = 0; k < n; k++)
             {
-                br.GradientStops.Add(new GradientStop(Col(0xFF, 0xFFFDF4), 0.0));
-                br.GradientStops.Add(new GradientStop(Col(0xF4, 0xFFEBB2), 0.24));
-                br.GradientStops.Add(new GradientStop(Col(0xE4, 0xFFCB62), 0.60));
-                br.GradientStops.Add(new GradientStop(Col(0xF4, 0xBE7412), 1.0));
+                double a = k * Math.PI * 2.0 / n;
+                double rr = r * (1.0 + 0.020 * Math.Sin(3.0 * a + phase) + 0.013 * Math.Sin(5.0 * a + phase * 1.7));
+                var pt = new Point(cx + rr * Math.Cos(a), cy + rr * Math.Sin(a));
+                if (k == 0) fig.StartPoint = pt;
+                else fig.Segments.Add(new LineSegment { Point = pt });
             }
-            else
-            {
-                br.GradientStops.Add(new GradientStop(Col(0xFA, 0xF8FDFF), 0.0));
-                br.GradientStops.Add(new GradientStop(Col(0xF2, 0xD2F2FF), 0.24));
-                br.GradientStops.Add(new GradientStop(Col(0xE0, 0x82C6EA), 0.60));
-                br.GradientStops.Add(new GradientStop(Col(0xF0, 0x2C6CA6), 1.0));
-            }
+            var geo = new PathGeometry();
+            geo.Figures.Add(fig);
+            return geo;
+        }
+
+        // 水彩球：淡 → 饱和 → 深，高光不再惨白
+        static RadialGradientBrush BubbleBrush(Color baseCol)
+        {
+            var br = new RadialGradientBrush { Center = new Point(0.38, 0.30), GradientOrigin = new Point(0.38, 0.30) };
+            br.GradientStops.Add(new GradientStop(WithAlpha(MixColor(baseCol, Colors.White, 0.66), 0xEE), 0.0));
+            br.GradientStops.Add(new GradientStop(WithAlpha(MixColor(baseCol, Colors.White, 0.28), 0xEE), 0.28));
+            br.GradientStops.Add(new GradientStop(WithAlpha(baseCol, 0xEE), 0.64));
+            br.GradientStops.Add(new GradientStop(WithAlpha(ShadeColor(baseCol, 0.58), 0xF0), 1.0));
+            br.Freeze();
+            return br;
+        }
+
+        // 一条水彩色的轨道彩带
+        static LinearGradientBrush WaterColorStrip(byte alpha)
+        {
+            var br = new LinearGradientBrush { StartPoint = new Point(0, 0.5), EndPoint = new Point(1, 0.5) };
+            double[] pos = { 0.0, 0.16, 0.32, 0.48, 0.64, 0.80, 1.0 };
+            for (int k = 0; k < pos.Length; k++)
+                br.GradientStops.Add(new GradientStop(WithAlpha(VividColor(k * 2), alpha), pos[k]));
             br.Freeze();
             return br;
         }
@@ -1381,7 +1436,7 @@ namespace DesktopPet
         }
 
         // 轨道线：后半圈在豆仔轮廓内断开（被豆仔挡住），前半圈整段画
-        void AddOrbitArc(double cx, double cy, bool front, double thick, byte a, int rgb)
+        void AddOrbitArc(double cx, double cy, bool front, double thick, Brush brush, double opacity)
         {
             var geo = new PathGeometry();
             PathFigure fig = null;
@@ -1405,11 +1460,12 @@ namespace DesktopPet
             var el = new System.Windows.Shapes.Path
             {
                 Data = geo,
-                Stroke = new SolidColorBrush(Col(a, rgb)),
+                Stroke = brush,
                 StrokeThickness = thick,
                 StrokeStartLineCap = PenLineCap.Round,
                 StrokeEndLineCap = PenLineCap.Round,
                 Fill = null,
+                Opacity = opacity,
                 IsHitTestVisible = false
             };
             AddDecoUnder(5, el);
@@ -1418,9 +1474,9 @@ namespace DesktopPet
         void BuildOrbitDeco(double cx, double cy)
         {
             // 轨道：后半圈很淡（只在豆仔头后若隐若现），前半圈亮一些
-            AddOrbitArc(cx, cy, false, 5.0, 0x10, 0x2E6FA8);
-            AddOrbitArc(cx, cy, false, 1.2, 0x34, 0xBEE8FF);
-            AddOrbitArc(cx, cy, true, 8.0, 0x22, 0x2E6FA8);
+            AddOrbitArc(cx, cy, false, 2.4, WaterColorStrip(0x80), 0.28);    // 后半圈：很淡的水彩带
+            AddOrbitArc(cx, cy, true, 13.0, WaterColorStrip(0x58), 0.26);    // 前半圈：柔光晕
+            AddOrbitArc(cx, cy, true, 3.6, WaterColorStrip(0xB8), 0.92);     // 前半圈：水彩彩带
             var geoFront = new PathGeometry();
             var figFront = new PathFigure { IsClosed = false };
             for (int k = 0; k <= 72; k++)
@@ -1436,8 +1492,8 @@ namespace DesktopPet
             _orbPathLine = new System.Windows.Shapes.Path
             {
                 Data = geoFront,
-                Stroke = new SolidColorBrush(Col(0xDE, 0xF2FDFF)),
-                StrokeThickness = 1.4,
+                Stroke = new SolidColorBrush(Col(0x70, 0xFFFFFF)),
+                StrokeThickness = 1.0,
                 StrokeStartLineCap = PenLineCap.Round,
                 StrokeEndLineCap = PenLineCap.Round,
                 Fill = null,
@@ -1463,56 +1519,96 @@ namespace DesktopPet
 
                 // 泡体：左上亮、边缘深的冰蓝球
                 // 外圈暗边（让气泡在白底上也有轮廓）
-                var halo = new System.Windows.Shapes.Ellipse { Width = 47, Height = 47, Fill = null, Stroke = new SolidColorBrush(Col(0x30, 0x1E4E7A)), StrokeThickness = 2.4 };
-                Canvas.SetLeft(halo, 8.5);
-                Canvas.SetTop(halo, 6.5);
+                // ---- 水彩星体：一颗一个颜色，高光收敛 ----
+                Color baseCol = VividColor(i);
+                Color deepCol = ShadeColor(baseCol, 0.58);
+                Color softCol = MixColor(baseCol, Colors.White, 0.78);
+                Color mixCol = MixColor(baseCol, VividColor(i + 5), 0.55);
+
+                // 水彩晕：颜料在纸面上化开的一圈
+                var wash = new System.Windows.Shapes.Ellipse { Width = 62, Height = 62 };
+                var washBr = new RadialGradientBrush { Center = new Point(0.5, 0.5), GradientOrigin = new Point(0.44, 0.42) };
+                washBr.GradientStops.Add(new GradientStop(WithAlpha(baseCol, 0x00), 0.0));
+                washBr.GradientStops.Add(new GradientStop(WithAlpha(baseCol, 0x2C), 0.60));
+                washBr.GradientStops.Add(new GradientStop(WithAlpha(deepCol, 0x16), 0.82));
+                washBr.GradientStops.Add(new GradientStop(WithAlpha(deepCol, 0x00), 1.0));
+                washBr.Freeze();
+                wash.Fill = washBr;
+                Canvas.SetLeft(wash, 1);
+                Canvas.SetTop(wash, -1);
+                root.Children.Add(wash);
+
+                // 外圈：同色系深色软边（不再用深蓝描边）
+                var halo = new System.Windows.Shapes.Ellipse
+                {
+                    Width = 46, Height = 46, Fill = null,
+                    Stroke = new SolidColorBrush(WithAlpha(deepCol, 0x3E)), StrokeThickness = 2.6
+                };
+                Canvas.SetLeft(halo, 9);
+                Canvas.SetTop(halo, 7);
                 root.Children.Add(halo);
 
-                var body = new System.Windows.Shapes.Ellipse { Width = 42, Height = 42 };
-                var brN = BubbleBrush(false);
-                var brOn = BubbleBrush(true);
-                body.Fill = brN;
-                Canvas.SetLeft(body, 11);
-                Canvas.SetTop(body, 9);
+                // 主体：手绘感的圆形 + 水彩渐变
+                var bodyGeo = BlobGeo(32.0, 29.5, 20.6, i * 1.7);
+                var brN = BubbleBrush(baseCol);
+                var brOn = BubbleBrush(Col(0xFF, 0xFFC359));
+                var body = new System.Windows.Shapes.Path { Data = bodyGeo, Fill = brN, IsHitTestVisible = false };
                 root.Children.Add(body);
 
-                // 边缘亮弧
-                var rim = new System.Windows.Shapes.Ellipse
+                // 第二层颜料（相邻色混进来，像水彩叠色）
+                var tint = new System.Windows.Shapes.Ellipse { Width = 21, Height = 14 };
+                var tintBr = new RadialGradientBrush();
+                tintBr.GradientStops.Add(new GradientStop(WithAlpha(mixCol, 0x4E), 0.0));
+                tintBr.GradientStops.Add(new GradientStop(WithAlpha(mixCol, 0x00), 1.0));
+                tintBr.Freeze();
+                tint.Fill = tintBr;
+                tint.RenderTransform = new RotateTransform(32);
+                tint.RenderTransformOrigin = new Point(0.5, 0.5);
+                Canvas.SetLeft(tint, 24);
+                Canvas.SetTop(tint, 26);
+                root.Children.Add(tint);
+
+                // 边缘：淡色软描边（比原来的白色亮弧弱很多）
+                var rim = new System.Windows.Shapes.Path
                 {
-                    Width = 42, Height = 42, Fill = null,
-                    Stroke = new SolidColorBrush(Col(0xC8, 0xF2FDFF)), StrokeThickness = 1.3
+                    Data = bodyGeo, Fill = null,
+                    Stroke = new SolidColorBrush(WithAlpha(MixColor(baseCol, Colors.White, 0.80), 0x8C)),
+                    StrokeThickness = 1.0, IsHitTestVisible = false
                 };
-                Canvas.SetLeft(rim, 11);
-                Canvas.SetTop(rim, 9);
+                var rimNorm = rim.Stroke;
                 root.Children.Add(rim);
 
-                // 左上高光
-                var hi = new System.Windows.Shapes.Ellipse { Width = 13, Height = 8, Fill = new SolidColorBrush(Col(0xF0, 0xFFFFFF)) };
+                // 高光：压小压淡（原来太大太亮）
+                var hi = new System.Windows.Shapes.Ellipse
+                {
+                    Width = 10.5, Height = 6.0,
+                    Fill = new SolidColorBrush(WithAlpha(softCol, 0x8E))
+                };
                 hi.RenderTransform = new RotateTransform(-26);
                 hi.RenderTransformOrigin = new Point(0.5, 0.5);
-                Canvas.SetLeft(hi, 18);
-                Canvas.SetTop(hi, 16);
+                Canvas.SetLeft(hi, 18.5);
+                Canvas.SetTop(hi, 17);
                 root.Children.Add(hi);
 
-                // 右下反光（透光感）
-                var ca = new System.Windows.Shapes.Ellipse { Width = 15, Height = 8, Opacity = 0.55 };
+                // 右下反光：也压淡
+                var ca = new System.Windows.Shapes.Ellipse { Width = 13, Height = 7, Opacity = 0.26 };
                 var caBr = new RadialGradientBrush();
-                caBr.GradientStops.Add(new GradientStop(Col(0xAA, 0xE8FEFF), 0.0));
-                caBr.GradientStops.Add(new GradientStop(Col(0x00, 0xE8FEFF), 1.0));
+                caBr.GradientStops.Add(new GradientStop(WithAlpha(softCol, 0xCC), 0.0));
+                caBr.GradientStops.Add(new GradientStop(WithAlpha(softCol, 0x00), 1.0));
                 caBr.Freeze();
                 ca.Fill = caBr;
                 ca.RenderTransform = new RotateTransform(24);
                 ca.RenderTransformOrigin = new Point(0.5, 0.5);
-                Canvas.SetLeft(ca, 26);
+                Canvas.SetLeft(ca, 27);
                 Canvas.SetTop(ca, 38);
                 root.Children.Add(ca);
 
-                // 选中光环
                 var gl = new System.Windows.Shapes.Ellipse { Width = 72, Height = 72, Opacity = 0.0 };
                 var glBr = new RadialGradientBrush();
-                glBr.GradientStops.Add(new GradientStop(Col(0x00, 0xBFEAFF), 0.50));
-                glBr.GradientStops.Add(new GradientStop(Col(0x34, 0xBFEAFF), 0.78));
-                glBr.GradientStops.Add(new GradientStop(Col(0x00, 0xEAFBFF), 1.0));
+                var glCol = MixColor(baseCol, Colors.White, 0.45);
+                glBr.GradientStops.Add(new GradientStop(WithAlpha(glCol, 0x00), 0.50));
+                glBr.GradientStops.Add(new GradientStop(WithAlpha(glCol, 0x38), 0.78));
+                glBr.GradientStops.Add(new GradientStop(WithAlpha(glCol, 0x00), 1.0));
                 glBr.Freeze();
                 gl.Fill = glBr;
                 Canvas.SetLeft(gl, -4);
@@ -1552,9 +1648,48 @@ namespace DesktopPet
                 _orbRimEls.Add(rim);
                 _orbBrNorm.Add(brN);
                 _orbBrOn.Add(brOn);
+                _orbRimNorm.Add(rimNorm);
                 _orbStateDot.Add(dot);
                 _orbPhase.Add(i * 0.63);
                 _orbSizeVar.Add(0.90 + 0.16 * Math.Abs(Math.Sin(i * 2.7 + 0.4)));   // 大小不一，像图里那样
+            }
+
+            // 水彩飞溅：轨道周围几粒半透明颜料点，像笔尖甩出来的
+            var splat = new Random(1314);
+            for (int i = 0; i < 16; i++)
+            {
+                double a = splat.NextDouble() * Math.PI * 2.0;
+                double x, y;
+                OrbPos(a, out x, out y);
+                double jx = (splat.NextDouble() - 0.5) * 26.0;
+                double jy = (splat.NextDouble() - 0.5) * 20.0;
+                double rr = 1.4 + splat.NextDouble() * 2.6;
+                var dot = new System.Windows.Shapes.Ellipse
+                {
+                    Width = rr * 2, Height = rr * 2,
+                    Fill = new SolidColorBrush(WithAlpha(VividColor(i), 0x66)),
+                    IsHitTestVisible = false
+                };
+                Canvas.SetLeft(dot, cx + x + jx - rr);
+                Canvas.SetTop(dot, cy + y + jy - rr);
+                AddDecoUnder(5, dot);
+            }
+            for (int i = 0; i < 5; i++)
+            {
+                double a = splat.NextDouble() * Math.PI * 2.0;
+                double x, y;
+                OrbPos(a, out x, out y);
+                double rr = 5.0 + splat.NextDouble() * 5.0;
+                var blob = new System.Windows.Shapes.Ellipse { Width = rr * 2, Height = rr * 1.6, Opacity = 0.20 };
+                var blobBr = new RadialGradientBrush();
+                var bc = VividColor(i * 3 + 1);
+                blobBr.GradientStops.Add(new GradientStop(WithAlpha(bc, 0x88), 0.0));
+                blobBr.GradientStops.Add(new GradientStop(WithAlpha(bc, 0x00), 1.0));
+                blobBr.Freeze();
+                blob.Fill = blobBr;
+                Canvas.SetLeft(blob, cx + x - rr);
+                Canvas.SetTop(blob, cy + y - rr * 0.8);
+                AddDecoUnder(5, blob);
             }
 
             // 轨道外几颗小星芒
@@ -1679,7 +1814,7 @@ namespace DesktopPet
                 if (i < _orbBodyEls.Count)
                 {
                     _orbBodyEls[i].Fill = on ? _orbBrOn[i] : _orbBrNorm[i];
-                    _orbRimEls[i].Stroke = new SolidColorBrush(on ? Col(0xE8, 0xFFF6C8) : Col(0xC8, 0xF2FDFF));
+                    _orbRimEls[i].Stroke = on ? _orbRimOn : _orbRimNorm[i];
                 }
             }
         }
