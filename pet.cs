@@ -2598,6 +2598,7 @@ namespace DesktopPet
             };
             var border = new Border
             {
+                Tag = "nodrag",
                 Background = accent
                     ? ChatGrad(0xFF, 0x5B8DEF, 0xFF, 0x8A6BFF)
                     : new SolidColorBrush(Col(0x33, 0xC8, 0xD6, 0xFF)),
@@ -2831,14 +2832,16 @@ namespace DesktopPet
                 {
                     Title = "模型接口设置",
                     Width = 460,
-                    Height = 470,
+                    Height = 492,
                     WindowStartupLocation = WindowStartupLocation.CenterScreen,
                     Topmost = true,
-                    ResizeMode = ResizeMode.NoResize,
                     Background = new SolidColorBrush(Col(0xFF, 0x14, 0x1A, 0x2C)),
                     FontFamily = font
                 };
-                var sp = new StackPanel { Margin = new Thickness(18) };
+                ApplyCustomChrome(dlg, 46.0, false);
+                var dlgIcon = MakeWindowIcon();
+                if (dlgIcon != null) dlg.Icon = dlgIcon;
+                var sp = new StackPanel { Margin = new Thickness(18, 12, 18, 18) };
                 var title = new TextBlock
                 {
                     Text = "OpenAI 兼容接口",
@@ -2926,10 +2929,150 @@ namespace DesktopPet
                 row.Children.Add(btnSave);
                 row.Children.Add(btnCancel);
                 sp.Children.Add(row);
-                dlg.Content = sp;
+                var dlgRoot = new Grid();
+                dlgRoot.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                dlgRoot.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+                var dlgHeader = MakeDialogHeader(dlg, "模型接口设置", font);
+                MakeDraggable(dlgHeader, dlg);
+                dlgRoot.Children.Add(dlgHeader);
+                Grid.SetRow(dlgHeader, 0);
+                dlgRoot.Children.Add(sp);
+                Grid.SetRow(sp, 1);
+                var dlgShell = new Border
+                {
+                    BorderBrush = new SolidColorBrush(Col(0xFF, 0x2C, 0x38, 0x5C)),
+                    BorderThickness = new Thickness(1),
+                    Child = dlgRoot
+                };
+                dlg.Content = dlgShell;
+                dlg.PreviewKeyDown += delegate(object s2, KeyEventArgs e2)
+                {
+                    if (e2.Key == Key.Escape) { dlg.Close(); e2.Handled = true; }
+                };
                 dlg.ShowDialog();
             }
             catch (Exception ex) { Log.Write("ai settings: " + ex.Message); }
+        }
+
+        // ---- 无边框窗口 + 自绘标题栏：避免系统白色标题条和深空内容打架 ----
+        static void ApplyCustomChrome(Window win, double captionHeight, bool resizable)
+        {
+            var chrome = new System.Windows.Shell.WindowChrome
+            {
+                CaptionHeight = 0,
+                ResizeBorderThickness = resizable ? new Thickness(8) : new Thickness(0),
+                GlassFrameThickness = new Thickness(0),
+                CornerRadius = new CornerRadius(0),
+                UseAeroCaptionButtons = false
+            };
+            System.Windows.Shell.WindowChrome.SetWindowChrome(win, chrome);
+            win.WindowStyle = WindowStyle.None;
+            win.ResizeMode = resizable ? ResizeMode.CanResize : ResizeMode.NoResize;
+        }
+
+        static void MakeDraggable(FrameworkElement handle, Window win)
+        {
+            handle.MouseLeftButtonDown += delegate(object s2, MouseButtonEventArgs e2)
+            {
+                if (e2.ChangedButton != MouseButton.Left) return;
+                if (e2.ClickCount > 1) return;                  // 双击不拖动、也不最大化
+                // 点在按钮上就不拖窗口
+                DependencyObject dep = e2.OriginalSource as DependencyObject;
+                while (dep != null)
+                {
+                    var fe = dep as FrameworkElement;
+                    if (fe != null && (fe.Tag as string) == "nodrag") return;
+                    dep = VisualTreeHelper.GetParent(dep);
+                }
+                try { win.DragMove(); } catch { }
+            };
+        }
+
+        static Border MakeWinButton(string glyph, Window win, Action onClick, bool danger)
+        {
+            var tb = new TextBlock
+            {
+                Text = glyph,
+                FontSize = 12,
+                FontFamily = new FontFamily("Segoe UI"),
+                Foreground = new SolidColorBrush(Col(0xE0, 0xD6, 0xE0, 0xFF)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var b = new Border
+            {
+                Tag = "nodrag",
+                Width = 30, Height = 24,
+                CornerRadius = new CornerRadius(6),
+                Background = Brushes.Transparent,
+                Child = tb,
+                Cursor = Cursors.Hand,
+                Margin = new Thickness(2, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            b.MouseLeftButtonUp += delegate
+            {
+                try { onClick(); }
+                catch (Exception ex) { Log.Write("win btn: " + ex.Message); }
+            };
+            b.MouseEnter += delegate { b.Background = new SolidColorBrush(danger ? Col(0xCC, 0xC8, 0x3F, 0x4C) : Col(0x33, 0xD6, 0xE0, 0xFF)); };
+            b.MouseLeave += delegate { b.Background = Brushes.Transparent; };
+            return b;
+        }
+
+        static FrameworkElement MakeDialogHeader(Window win, string title, FontFamily font)
+        {
+            var bar = new Border
+            {
+                Background = ChatGrad(0xFF, 0x1E2746, 0xFF, 0x161D36),
+                BorderBrush = new SolidColorBrush(Col(0xFF, 0x2C, 0x38, 0x5C)),
+                BorderThickness = new Thickness(0, 0, 0, 1),
+                Padding = new Thickness(16, 10, 8, 10)
+            };
+            var g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var tb = new TextBlock
+            {
+                Text = title,
+                FontSize = 15,
+                FontWeight = FontWeights.Bold,
+                Foreground = Brushes.White,
+                FontFamily = font,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(tb, 0);
+            g.Children.Add(tb);
+            var close = MakeWinButton("✕", win, delegate { win.Close(); }, true);
+            close.Width = 30;
+            close.Height = 24;
+            Grid.SetColumn(close, 1);
+            g.Children.Add(close);
+            bar.Child = g;
+            return bar;
+        }
+
+        // 窗口/任务栏图标：运行时画一个 32x32 的蓝色小球
+        static ImageSource MakeWindowIcon()
+        {
+            try
+            {
+                var dv = new DrawingVisual();
+                using (var dc = dv.RenderOpen())
+                {
+                    var br = new RadialGradientBrush { Center = new Point(0.36, 0.30), GradientOrigin = new Point(0.36, 0.30) };
+                    br.GradientStops.Add(new GradientStop(Col(0xFF, 0xEAF6FF), 0.0));
+                    br.GradientStops.Add(new GradientStop(Col(0xFF, 0x8FCBEA), 0.55));
+                    br.GradientStops.Add(new GradientStop(Col(0xFF, 0x2E5F92), 1.0));
+                    dc.DrawEllipse(br, new Pen(new SolidColorBrush(Col(0xFF, 0x25, 0x2B, 0x38)), 1.6), new Point(16, 17), 13, 13);
+                    dc.DrawEllipse(new SolidColorBrush(Col(0xE6, 0xFF, 0xFF, 0xFF)), null, new Point(11.5, 11.5), 3.4, 2.8);
+                }
+                var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(32, 32, 96, 96, PixelFormats.Pbgra32);
+                rtb.Render(dv);
+                rtb.Freeze();
+                return rtb;
+            }
+            catch { return null; }
         }
 
         void ShowChatWindow()
@@ -2954,10 +3097,12 @@ namespace DesktopPet
                     MinHeight = 400,
                     WindowStartupLocation = WindowStartupLocation.CenterScreen,
                     Topmost = true,
-                    ResizeMode = ResizeMode.CanResizeWithGrip,
                     FontFamily = font,
                     Background = ChatGrad(0xFF, 0x101628, 0xFF, 0x1A223E)
                 };
+                ApplyCustomChrome(win, 68.0, true);
+                var winIcon = MakeWindowIcon();
+                if (winIcon != null) win.Icon = winIcon;
                 var root = new Grid();
                 root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
                 root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -3012,9 +3157,19 @@ namespace DesktopPet
                 btnSet.Margin = new Thickness(0, 0, 6, 0);
                 headerBtns.Children.Add(btnSet);
                 headerBtns.Children.Add(MakePillButton("清空", delegate { ClearChat(); }, false));
+                headerBtns.Children.Add(new Border
+                {
+                    Width = 1, Height = 18,
+                    Background = new SolidColorBrush(Col(0x40, 0xD6, 0xE0, 0xFF)),
+                    Margin = new Thickness(8, 0, 6, 0),
+                    VerticalAlignment = VerticalAlignment.Center
+                });
+                headerBtns.Children.Add(MakeWinButton("—", win, delegate { win.WindowState = WindowState.Minimized; }, false));
+                headerBtns.Children.Add(MakeWinButton("✕", win, delegate { win.Close(); }, true));
                 Grid.SetColumn(headerBtns, 2);
                 headerGrid.Children.Add(headerBtns);
                 header.Child = headerGrid;
+                MakeDraggable(header, win);
                 root.Children.Add(header);
                 Grid.SetRow(header, 0);
 
@@ -3122,7 +3277,13 @@ namespace DesktopPet
                 {
                     if (e2.Key == Key.Enter || e2.Key == Key.Return) { SendChat(); e2.Handled = true; }
                 };
-                win.Content = root;
+                var shell = new Border
+                {
+                    BorderBrush = new SolidColorBrush(Col(0xFF, 0x2C, 0x38, 0x5C)),
+                    BorderThickness = new Thickness(1),
+                    Child = root
+                };
+                win.Content = shell;
                 win.Closed += delegate
                 {
                     _chatWin = null;
