@@ -2389,7 +2389,8 @@ namespace DesktopPet
         double _chatLeft = double.NaN, _chatTop = double.NaN, _chatW = 400, _chatH = 560;
         bool _chatHasGeom;
         Window _chatWinRef;
-        Border _chatHeaderEl, _chatMsgEl, _chatSwatch;
+        Border _chatHeaderEl, _chatMsgEl, _chatSwatch, _chatShell, _chatSep;
+        TextBlock _chatSendText;
         TextBlock _chatTitleEl;
         System.Windows.Shapes.Ellipse _chatBlob1, _chatBlob2;
         readonly List<Border> _chatPillBorders = new List<Border>();
@@ -2400,17 +2401,27 @@ namespace DesktopPet
         {
             public string Name;
             public int Win1, Win2, Head1, Head2, Line, Panel, InputBg, InputLine;
-            public int Acc1, Acc2, Text, Muted, PillBg, PetBubble, PetText;
+            public int Acc1, Acc2, Text, Muted, PillBg, PetBubble, PetText, UserText, AccText;
         }
 
         static readonly ChatTheme[] ChatThemes = new ChatTheme[]
         {
-            new ChatTheme { Name = "深空", Win1 = 0x101628, Win2 = 0x1A223E, Head1 = 0x1E2746, Head2 = 0x161D36, Line = 0x2C385C, Panel = 0x0D1222, InputBg = 0x1A2340, InputLine = 0x33406B, Acc1 = 0x5B8DEF, Acc2 = 0x8A6BFF, Text = 0xEAF0FC, Muted = 0x8C98B4, PillBg = 0xC8D6FF, PetBubble = 0xF4F8FF, PetText = 0x1C2638 },
-            new ChatTheme { Name = "暮光", Win1 = 0x1A1030, Win2 = 0x2A1440, Head1 = 0x2A1848, Head2 = 0x1E1034, Line = 0x3C2A5C, Panel = 0x140C24, InputBg = 0x1E1236, InputLine = 0x4A3468, Acc1 = 0xC06BE8, Acc2 = 0xF06BA0, Text = 0xF4ECFF, Muted = 0xA896C4, PillBg = 0xE8D6FF, PetBubble = 0xF8F0FF, PetText = 0x2A1C38 },
-            new ChatTheme { Name = "深海", Win1 = 0x0A1A24, Win2 = 0x0E2A38, Head1 = 0x0F2A38, Head2 = 0x0A1F2A, Line = 0x1F4454, Panel = 0x081820, InputBg = 0x0E2632, InputLine = 0x235064, Acc1 = 0x2FB8D8, Acc2 = 0x4FE0C8, Text = 0xE6F8FF, Muted = 0x8FB4C4, PillBg = 0xC8F0FF, PetBubble = 0xEFFCFF, PetText = 0x12303C },
-            new ChatTheme { Name = "暖沙", Win1 = 0x1C1710, Win2 = 0x2A2114, Head1 = 0x2A2114, Head2 = 0x20180E, Line = 0x4A3A24, Panel = 0x16110A, InputBg = 0x231B10, InputLine = 0x4A3A24, Acc1 = 0xE0A050, Acc2 = 0xF0C060, Text = 0xFBF2E2, Muted = 0xB0A088, PillBg = 0xFFE8C0, PetBubble = 0xFFF8EC, PetText = 0x30240F },
-            new ChatTheme { Name = "墨黑", Win1 = 0x14161A, Win2 = 0x1E2126, Head1 = 0x22252B, Head2 = 0x191B20, Line = 0x33373F, Panel = 0x101216, InputBg = 0x1A1D23, InputLine = 0x3A3F48, Acc1 = 0x6E8FD8, Acc2 = 0x9AA8F0, Text = 0xF0F2F6, Muted = 0x949AA6, PillBg = 0xD8DCE6, PetBubble = 0xF2F4F8, PetText = 0x1C1F26 },
+            new ChatTheme { Name = "深空", Win1 = 0x101628, Win2 = 0x1A223E, Head1 = 0x1E2746, Head2 = 0x161D36, Line = 0x2C385C, Panel = 0x0D1222, InputBg = 0x1A2340, InputLine = 0x33406B, Acc1 = 0x5B8DEF, Acc2 = 0x8A6BFF, Text = 0xEAF0FC, Muted = 0x8C98B4, PillBg = 0xC8D6FF, PetBubble = 0xF4F8FF, PetText = 0x1C2638, UserText = 0xFFFFFF, AccText = 0xFFFFFF },
+            new ChatTheme { Name = "暮光", Win1 = 0x1A1030, Win2 = 0x2A1440, Head1 = 0x2A1848, Head2 = 0x1E1034, Line = 0x3C2A5C, Panel = 0x140C24, InputBg = 0x1E1236, InputLine = 0x4A3468, Acc1 = 0xC06BE8, Acc2 = 0xF06BA0, Text = 0xF4ECFF, Muted = 0xA896C4, PillBg = 0xE8D6FF, PetBubble = 0xF8F0FF, PetText = 0x2A1C38, UserText = 0xFFFFFF, AccText = 0xFFFFFF },
+            new ChatTheme { Name = "深海", Win1 = 0x0A1A24, Win2 = 0x0E2A38, Head1 = 0x0F2A38, Head2 = 0x0A1F2A, Line = 0x1F4454, Panel = 0x081820, InputBg = 0x0E2632, InputLine = 0x235064, Acc1 = 0x2FB8D8, Acc2 = 0x4FE0C8, Text = 0xE6F8FF, Muted = 0x8FB4C4, PillBg = 0xC8F0FF, PetBubble = 0xEFFCFF, PetText = 0x12303C, UserText = 0xFFFFFF, AccText = 0xFFFFFF },
+            new ChatTheme { Name = "暖沙", Win1 = 0x1C1710, Win2 = 0x2A2114, Head1 = 0x2A2114, Head2 = 0x20180E, Line = 0x4A3A24, Panel = 0x16110A, InputBg = 0x231B10, InputLine = 0x4A3A24, Acc1 = 0xE0A050, Acc2 = 0xF0C060, Text = 0xFBF2E2, Muted = 0xB0A088, PillBg = 0xFFE8C0, PetBubble = 0xFFF8EC, PetText = 0x30240F, UserText = 0xFFFFFF, AccText = 0xFFFFFF },
+            new ChatTheme { Name = "墨黑", Win1 = 0x14161A, Win2 = 0x1E2126, Head1 = 0x22252B, Head2 = 0x191B20, Line = 0x33373F, Panel = 0x101216, InputBg = 0x1A1D23, InputLine = 0x3A3F48, Acc1 = 0x6E8FD8, Acc2 = 0x9AA8F0, Text = 0xF0F2F6, Muted = 0x949AA6, PillBg = 0xD8DCE6, PetBubble = 0xF2F4F8, PetText = 0x1C1F26, UserText = 0xFFFFFF, AccText = 0xFFFFFF },
+            new ChatTheme { Name = "乳白", Win1 = 0xEDE4D2, Win2 = 0xF8F3E8, Head1 = 0xFBF6EA, Head2 = 0xF0E8D8, Line = 0xDCD0B8, Panel = 0xFFFCF4, InputBg = 0xFFFDF8, InputLine = 0xDCD0B8, Acc1 = 0xC08B52, Acc2 = 0xD7A469, Text = 0x3A3026, Muted = 0x8A7A66, PillBg = 0x6B5A44, PetBubble = 0xFFFFFF, PetText = 0x2E261C, UserText = 0xFFFBF3, AccText = 0xFFFBF3 },
         };
+
+        static Brush ChatGradV(int a1, int c1, int a2, int c2)
+        {
+            var br = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(0, 1) };
+            br.GradientStops.Add(new GradientStop(WithAlpha(Col(0xFF, c1), (byte)a1), 0.0));
+            br.GradientStops.Add(new GradientStop(WithAlpha(Col(0xFF, c2), (byte)a2), 1.0));
+            br.Freeze();
+            return br;
+        }
 
         static Color ThemeColor(int rgb) { return Col(0xFF, rgb); }
         static Color ThemeColorA(byte a, int rgb) { return Color.FromArgb(a, (byte)((rgb >> 16) & 0xFF), (byte)((rgb >> 8) & 0xFF), (byte)(rgb & 0xFF)); }
@@ -2637,7 +2648,7 @@ namespace DesktopPet
                 Text = text,
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
-                Foreground = accent ? Brushes.White : new SolidColorBrush(Col(0xE8, 0xD6, 0xE0, 0xFF)),
+                Foreground = accent ? new SolidColorBrush(Col(0xFF, 0xFF, 0xFB, 0xF3)) : new SolidColorBrush(Col(0xE8, 0xD6, 0xE0, 0xFF)),
                 FontFamily = new FontFamily("Microsoft YaHei UI")
             };
             var border = new Border
@@ -2688,10 +2699,11 @@ namespace DesktopPet
             var th = ChatThemes[_chatTheme];
             try
             {
-                if (_chatWinRef != null) _chatWinRef.Background = ChatGrad(0xFF, th.Win1, 0xFF, th.Win2);
+                // 窗口底色和消息面板同一色：面板圆角处不会透出一圈"亮边"
+                if (_chatWinRef != null) _chatWinRef.Background = new SolidColorBrush(ThemeColor(th.Panel));
                 if (_chatHeaderEl != null)
                 {
-                    _chatHeaderEl.Background = ChatGrad(0xFF, th.Head1, 0xFF, th.Head2);
+                    _chatHeaderEl.Background = ChatGradV(0xFF, th.Head1, 0xFF, th.Head2);
                     _chatHeaderEl.BorderBrush = new SolidColorBrush(ThemeColor(th.Line));
                 }
                 if (_chatTitleEl != null) _chatTitleEl.Foreground = new SolidColorBrush(ThemeColor(th.Text));
@@ -2702,6 +2714,16 @@ namespace DesktopPet
                     _chatMsgEl.BorderBrush = new SolidColorBrush(ThemeColor(th.Line));
                 }
                 if (_chatInputWrap != null) _chatInputWrap.Background = new SolidColorBrush(ThemeColor(th.InputBg));
+                if (_chatInput != null)
+                {
+                    _chatInput.Foreground = new SolidColorBrush(ThemeColor(th.Text));
+                    _chatInput.CaretBrush = new SolidColorBrush(ThemeColor(th.Text));
+                    if (_chatInputWrap != null)
+                        _chatInputWrap.BorderBrush = new SolidColorBrush(ThemeColor(_chatInput.IsFocused ? th.Acc1 : th.InputLine));
+                }
+                if (_chatPlaceholder != null) _chatPlaceholder.Foreground = new SolidColorBrush(ThemeColor(th.Muted));
+                if (_chatShell != null) _chatShell.BorderBrush = new SolidColorBrush(Color.FromArgb(0x55, 0, 0, 0));
+                if (_chatSep != null) _chatSep.Background = new SolidColorBrush(ThemeColorA(0x40, th.Text));
                 if (_chatSend != null) _chatSend.Background = ChatGrad(0xFF, th.Acc1, 0xFF, th.Acc2);
                 for (int i = 0; i < _chatPillBorders.Count; i++)
                 {
@@ -2729,7 +2751,12 @@ namespace DesktopPet
                     b2.Freeze();
                     _chatBlob2.Fill = b2;
                 }
-                if (_chatSwatch != null) _chatSwatch.Background = ChatGrad(0xFF, th.Acc1, 0xFF, th.Acc2);
+                if (_chatSwatch != null)
+                {
+                    _chatSwatch.Background = ChatGrad(0xFF, th.Acc1, 0xFF, th.Acc2);
+                    _chatSwatch.BorderBrush = new SolidColorBrush(ThemeColorA(0x88, th.Text));
+                }
+                if (_chatSendText != null) _chatSendText.Foreground = new SolidColorBrush(ThemeColor(th.AccText));
                 if (_chatDot != null)
                     _chatDot.Fill = new SolidColorBrush(IsAiConfigured() ? Col(0xFF, 0x5B, 0xD0, 0x8A) : ThemeColor(th.Muted));
                 RebuildChatHistory();
@@ -2789,7 +2816,9 @@ namespace DesktopPet
                 FontFamily = font,
                 TextWrapping = TextWrapping.Wrap,
                 LineHeight = 19,
-                Foreground = fromUser ? Brushes.White : new SolidColorBrush(ThemeColor(ChatThemes[_chatTheme].PetText))
+                Foreground = fromUser
+                    ? new SolidColorBrush(ThemeColor(ChatThemes[_chatTheme].UserText))
+                    : new SolidColorBrush(ThemeColor(ChatThemes[_chatTheme].PetText))
             };
             var bubble = new Border
             {
@@ -3320,13 +3349,14 @@ namespace DesktopPet
                 var btnClear = MakePillButton("清空", delegate { ClearChat(); }, false);
                 RegisterChatPill(btnClear);
                 headerBtns.Children.Add(btnClear);
-                headerBtns.Children.Add(new Border
+                _chatSep = new Border
                 {
                     Width = 1, Height = 18,
                     Background = new SolidColorBrush(Col(0x40, 0xD6, 0xE0, 0xFF)),
                     Margin = new Thickness(8, 0, 6, 0),
                     VerticalAlignment = VerticalAlignment.Center
-                });
+                };
+                headerBtns.Children.Add(_chatSep);
                 var btnMin = MakeWinButton("—", win, delegate { win.WindowState = WindowState.Minimized; }, false);
                 if (btnMin.Child is TextBlock) _chatWinGlyphs.Add((TextBlock)btnMin.Child);
                 headerBtns.Children.Add(btnMin);
@@ -3398,6 +3428,7 @@ namespace DesktopPet
                 inputOuter.Children.Add(_chatInputWrap);
                 var inputDock = new DockPanel { LastChildFill = true };
                 _chatSend = MakePillButton("发送", delegate { SendChat(); }, true);
+                _chatSendText = _chatSend.Child as TextBlock;
                 _chatSend.Margin = new Thickness(8, 0, 0, 0);
                 DockPanel.SetDock(_chatSend, Dock.Right);
                 inputDock.Children.Add(_chatSend);
@@ -3453,6 +3484,7 @@ namespace DesktopPet
                     BorderThickness = new Thickness(1),
                     Child = root
                 };
+                _chatShell = shell;
                 win.Content = shell;
                 win.Closed += delegate
                 {
@@ -3482,6 +3514,9 @@ namespace DesktopPet
                     _chatMsgEl = null;
                     _chatTitleEl = null;
                     _chatSwatch = null;
+                    _chatShell = null;
+                    _chatSep = null;
+                    _chatSendText = null;
                     _chatBlob1 = null;
                     _chatBlob2 = null;
                     _chatPillBorders.Clear();
@@ -3521,6 +3556,12 @@ namespace DesktopPet
                             win.Height = h;
                             win.Left = Math.Min(Math.Max(_chatLeft, wa.Left), wa.Right - w);
                             win.Top = Math.Min(Math.Max(_chatTop, wa.Top), wa.Bottom - h);
+                            // 万一存下来的位置完全在屏幕外，拉回中间
+                            if (win.Left + win.Width < wa.Left || win.Left > wa.Right || win.Top + win.Height < wa.Top || win.Top > wa.Bottom)
+                            {
+                                win.Left = wa.Left + (wa.Width - win.Width) / 2;
+                                win.Top = wa.Top + (wa.Height - win.Height) / 2;
+                            }
                         }
                     }
                     catch { }
