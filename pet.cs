@@ -2794,8 +2794,8 @@ namespace DesktopPet
                 AddChatBubble(_chatHistory[i][1], _chatHistory[i][0] == "user", false);
             if (_chatHistory.Count == 0)
                 AddChatBubble(IsAiConfigured()
-                    ? "你好呀，我是豆仔～想聊点什么？"
-                    : "你好呀，我是豆仔～先点右上角「设置」填一下模型接口（OpenAI 兼容），我们就能聊天啦。Ctrl+O 也能打开设置。",
+                    ? "你好呀，我是豆仔～想聊点什么？\n（也能直接对我说「跳一下」「摇摇头」「睡觉」让我做动作，打「帮助」看全部）"
+                    : "你好呀，我是豆仔～先点右上角「设置」填一下模型接口（OpenAI 兼容），我们就能聊天啦。Ctrl+O 也能打开设置。\n（动作指令不用配接口也能用：说「跳一下」「帮助」试试）",
                     false, !IsAiConfigured());
         }
 
@@ -2943,6 +2943,149 @@ namespace DesktopPet
 
         bool IsAiConfigured() { return !string.IsNullOrEmpty(_aiUrl) && !string.IsNullOrEmpty(_aiModel); }
 
+        // ---- 聊天里的本地动作指令：不走模型，直接让豆仔做动作 ----
+        static bool CmdIn(string k, params string[] list)
+        {
+            for (int i = 0; i < list.Length; i++) if (k == list[i]) return true;
+            return false;
+        }
+
+        void PetCmdChat(string text)
+        {
+            try
+            {
+                if (_chatList != null)
+                {
+                    _chatHistory.Add(new string[] { "assistant", text });
+                    AddChatBubble(text, false, false);
+                }
+                else ShowBubble(Shorten(text, 60), true, 3.5);
+            }
+            catch { }
+        }
+
+        void PetCmdReply(string text)
+        {
+            ShowBubble(Shorten(text, 60), true, 3.5);
+            PetCmdChat(text);
+        }
+
+        void ShowPetCommands()
+        {
+            PetCmdChat("直接对我说这些就行：\n"
+                + "· 跳一下 / 蹦蹦 · 摇摇头 · 转个圈\n"
+                + "· 害羞 / 开心 / 好奇 / 困了\n"
+                + "· 睡觉 / 醒来 · 魔法球（开关）\n"
+                + "· 跟随 / 暂停 / 继续\n"
+                + "· 换个造型（菜单皮肤轮换）\n"
+                + "· 换个配色（聊天窗配色轮换）\n"
+                + "· 隐藏 / 显示\n"
+                + "· 说：你好呀（让我把后面的话念出来）\n"
+                + "其它话我会交给 AI 模型回答～");
+            ShowBubble("我会的可多啦，看聊天窗～", true, 4.0);
+            Log.Write("pet cmd help");
+        }
+
+        bool TryPetCommand(string raw)
+        {
+            string s = (raw ?? "").Trim();
+            if (s.Length == 0) return false;
+            string k = s.Replace(" ", "").Replace("\u3000", "");
+            k = k.TrimEnd('。', '，', '！', '!', '？', '?', '~', '～', '…', '.', '、', ')', '）');
+            k = k.TrimStart('，', '、');
+            k = k.ToLowerInvariant();
+            if (k.Length == 0) return false;
+
+            if (CmdIn(k, "帮助", "你会什么", "能做什么", "会什么", "动作", "命令", "help", "?"))
+            {
+                ShowPetCommands();
+                return true;
+            }
+
+            // 「说：xxx」「念 xxx」：让豆仔把后面的话念出来
+            if ((k.StartsWith("说") || k.StartsWith("念")) && k.Length > 2
+                && (s.Contains("：") || s.Contains(":") || s.Contains(" ")))
+            {
+                string say = s.Substring(1).Trim().TrimStart('：', ':', ' ');
+                if (say.Length > 0)
+                {
+                    ShowBubble(Shorten(say, 60), true, 4.0);
+                    PetCmdChat("好～");
+                    Log.Write("pet cmd say " + Shorten(say, 30));
+                    return true;
+                }
+            }
+
+            if (CmdIn(k, "跳一下", "跳一跳", "跳跳", "蹦一下", "蹦蹦", "弹跳", "jump", "bounce"))
+            { ApiAction("bounce"); PetCmdReply("嘿咻～"); }
+            else if (CmdIn(k, "摇头", "摇摇头", "摇一摇", "shake"))
+            { ApiAction("shake"); PetCmdReply("嗯？怎么啦～"); }
+            else if (CmdIn(k, "转个圈", "转一圈", "转圈", "turn"))
+            { ApiAction("turn"); PetCmdReply("转圈圈～"); }
+            else if (CmdIn(k, "害羞", "害羞一下", "blush"))
+            { ApiAction("blush"); SetMood("shy"); PetCmdReply("诶嘿…别看我啦"); }
+            else if (CmdIn(k, "开心", "笑一个", "笑一下", "happy"))
+            { SetMood("happy"); PetCmdReply("嘿嘿～"); }
+            else if (CmdIn(k, "好奇", "好奇一下", "curious"))
+            { SetMood("curious"); PetCmdReply("诶？什么什么？"); }
+            else if (CmdIn(k, "困了", "好困", "sleepy"))
+            { SetMood("sleepy"); PetCmdReply("哈啊…有点困了…"); }
+            else if (CmdIn(k, "睡觉", "睡吧", "去睡觉", "睡一会", "睡一觉", "doze", "sleep"))
+            {
+                if (!IsDoze()) ToggleDoze();
+                PetCmdReply("那我先眯一会儿…zZ");
+            }
+            else if (CmdIn(k, "醒来", "起床", "醒醒", "别睡了", "wake", "wakeup"))
+            {
+                if (IsDoze()) ToggleDoze(); else SetMood("neutral");
+                PetCmdReply("唔…我醒啦！");
+            }
+            else if (CmdIn(k, "魔法球", "开魔法球", "关魔法球", "orb"))
+            {
+                ToggleOrb();
+                PetCmdReply(_orbEnabled ? "魔法球来啦～" : "魔法球收起来啦");
+            }
+            else if (CmdIn(k, "跟随", "跟着我", "跟鼠标", "follow"))
+            {
+                ToggleFollowMouse();
+                PetCmdReply(_followMouse ? "好，我跟着你～" : "那我就不跟啦～");
+            }
+            else if (CmdIn(k, "暂停", "别动", "定住", "pause"))
+            {
+                if (!_paused) ApiPause(true);
+                PetCmdReply("好…我不动啦");
+            }
+            else if (CmdIn(k, "继续", "动起来", "不要暂停", "resume"))
+            {
+                if (_paused) ApiPause(false);
+                PetCmdReply("我又活过来啦！");
+            }
+            else if (CmdIn(k, "隐藏", "藏起来", "躲起来", "hide"))
+            {
+                PetCmdChat("那我先躲起来啦～说「显示」我就回来");
+                ApiSetVisible(false);
+            }
+            else if (CmdIn(k, "显示", "出来", "出来吧", "show"))
+            {
+                ApiSetVisible(true);
+                PetCmdReply("我出来啦～");
+            }
+            else if (CmdIn(k, "换个造型", "换造型", "换个风格", "换风格", "换个皮肤", "style"))
+            {
+                ToggleRadialStyle();
+                PetCmdReply("换好啦，现在是「" + StyleNames[_radialStyle] + "」菜单");
+            }
+            else if (CmdIn(k, "换个配色", "换配色", "换个窗口颜色", "换窗口颜色", "换个主题", "换主题", "theme"))
+            {
+                CycleChatTheme();
+                PetCmdReply("窗口配色换成「" + ChatThemes[_chatTheme].Name + "」啦");
+            }
+            else return false;
+
+            Log.Write("pet cmd " + Shorten(k, 24));
+            return true;
+        }
+
         void SendChat()
         {
             if (_chatBusy || _chatInput == null) return;
@@ -2952,6 +3095,9 @@ namespace DesktopPet
             _chatInput.Clear();
             AddChatBubble(text, true, false);
             _chatHistory.Add(new string[] { "user", text });
+
+            // 本地动作指令优先（不消耗 API）
+            if (TryPetCommand(text)) return;
 
             // 没配接口：退回「让豆仔念出来」
             if (!IsAiConfigured())
